@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "minAppVersion": "1.4.0",
   "description": "AI-powered vault analyst: find orphan notes, detect contradictions, surface knowledge gaps, and generate weekly insight reports. Works with Ollama (local), OpenAI, Anthropic, and OpenRouter. Paid license required after a 3-day trial.",
-  "author": "Vault Therapist",
+  "author": "Ruzgar Ozturk",
   "authorUrl": "https://vaulttherapist.com",
   "fundingUrl": "https://vaulttherapist.lemonsqueezy.com",
   "isDesktopOnly": true
