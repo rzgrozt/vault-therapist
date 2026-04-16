@@ -51,7 +51,7 @@ var DEFAULT_MODELS = {
   anthropic: "claude-3-5-haiku-20241022",
   openrouter: "meta-llama/llama-3.2-3b-instruct:free"
 };
-var RIBBON_ICON = "brain";
+var RIBBON_ICON = "brain-circuit";
 var RIBBON_TOOLTIP = "Open Vault Therapist";
 
 // src/settings/settings.ts

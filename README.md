@@ -56,7 +56,7 @@ Best for privacy-first users. Slower on consumer hardware; cost is $0.
 2. Pull a chat model and an embedding model:
    
    ```
-   ollama pull llama3.2
+   ollama pull gemma3:4b
    ollama pull nomic-embed-text
    ```
 3. Make sure Ollama is running (`ollama serve`, or the tray app).
@@ -68,7 +68,7 @@ Best for privacy-first users. Slower on consumer hardware; cost is $0.
 Best quality/speed balance. Pay-as-you-go.
 
 1. Create an API key at https://platform.openai.com/api-keys.
-2. In settings, pick **OpenAI**, paste the key, set model (default `gpt-4o-mini`).
+2. In settings, pick **OpenAI**, paste the key, set model (default `gpt-4o`).
 3. Test connection.
 
 ### Anthropic (Claude)
@@ -76,7 +76,7 @@ Best quality/speed balance. Pay-as-you-go.
 Strong reasoning; good for contradiction detection.
 
 1. Create an API key at https://console.anthropic.com/settings/keys.
-2. In settings, pick **Anthropic**, paste the key, set model (default `claude-3-5-haiku-20241022`).
+2. In settings, pick **Anthropic**, paste the key, set model (default `claude-4-5-haiku`).
 3. Test connection.
 
 ### OpenRouter
@@ -84,7 +84,7 @@ Strong reasoning; good for contradiction detection.
 Single account, dozens of models (including free tiers).
 
 1. Create an API key at https://openrouter.ai/keys.
-2. In settings, pick **OpenRouter**, paste the key, set model (default `meta-llama/llama-3.2-3b-instruct:free`).
+2. In settings, pick **OpenRouter**, paste the key, set model (default `google/gemma-4-31b-it:free`).
 3. Test connection.
 
 ## Pricing
@@ -107,8 +107,8 @@ Only if you pick a cloud AI provider. With Ollama, nothing ever leaves your mach
 **Which provider should I pick?**
 
 - Privacy > everything: **Ollama**.
-- Best general results for the price: **OpenAI** (`gpt-4o-mini`).
-- Best for subtle contradictions: **Anthropic** (`claude-3-5-haiku`).
+- Best general results for the price: **OpenAI** (`gpt-4o`).
+- Best for subtle contradictions: **Anthropic** (`claude-4-5-haiku`).
 - Want to try many models on one bill, including free tiers: **OpenRouter**.
 
 **What happens when the trial expires?**
@@ -125,18 +125,6 @@ The plugin source is in this repo under the Business Source License 1.1 (BUSL-1.
 
 **Can I use it on mobile?**
 Not yet — desktop only for now (`isDesktopOnly: true`). Mobile support is on the roadmap once embedding performance on-device is acceptable.
-
-## Development
-
-```
-npm install
-npm run dev       # watch build
-npm run build     # production build
-scripts/setup-test-vault.sh ~/my-test-vault
-scripts/dev-install.sh     ~/my-test-vault
-```
-
-QA against `docs/QA_CHECKLIST.md` before cutting a release.
 
 ## License
 
