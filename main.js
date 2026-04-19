@@ -43,16 +43,20 @@ var MAX_EMBEDDING_NOTES_PER_RUN = 500;
 var MAX_PROMPT_TOKENS = 6e3;
 var NETWORK_TIMEOUT_MS = 3e4;
 var LICENSE_OFFLINE_GRACE_MS = 24 * 60 * 60 * 1e3;
-var SUPPORTED_PROVIDERS = ["ollama", "openai", "anthropic", "openrouter"];
+var SUPPORTED_PROVIDERS = ["ollama", "openai", "anthropic", "openrouter", "gemini", "lmstudio"];
 var DEFAULT_MODELS = {
-  ollama: "llama3.2",
+  ollama: "gemma3:4b",
   ollamaEmbedding: "nomic-embed-text",
-  openai: "gpt-4o-mini",
-  anthropic: "claude-3-5-haiku-20241022",
-  openrouter: "meta-llama/llama-3.2-3b-instruct:free"
+  openai: "gpt-4o",
+  anthropic: "claude-4-5-haiku",
+  openrouter: "google/gemma-4-31b-it:free",
+  gemini: "gemini-2.0-flash",
+  geminiEmbedding: "text-embedding-004",
+  lmstudio: ""
 };
 var RIBBON_ICON = "brain-circuit";
 var RIBBON_TOOLTIP = "Open Vault Therapist";
+var AI_DISCLAIMER_TEXT = "AI-generated results may contain inaccuracies. Always verify before acting on suggestions.";
 
 // src/settings/settings.ts
 var DEFAULT_SETTINGS = {
@@ -67,6 +71,10 @@ var DEFAULT_SETTINGS = {
   anthropicModel: DEFAULT_MODELS.anthropic,
   openrouterApiKey: "",
   openrouterModel: DEFAULT_MODELS.openrouter,
+  geminiApiKey: "",
+  geminiModel: DEFAULT_MODELS.gemini,
+  lmstudioBaseUrl: "http://localhost:1234",
+  lmstudioModel: DEFAULT_MODELS.lmstudio,
   // Features
   enableOrphanFinder: true,
   enableContradictionDetector: true,
@@ -1162,7 +1170,11 @@ var ReportView = class extends import_obsidian.ItemView {
       );
     });
     const body = contentEl.createDiv({ cls: "vt-report-markdown markdown-rendered" });
-    import_obsidian.MarkdownRenderer.renderMarkdown(r.renderedMarkdown, body, "", this);
+    const disclaimerMd = `> [!info]
+> ${AI_DISCLAIMER_TEXT.replace(". ", ".\n> ")}
+
+`;
+    import_obsidian.MarkdownRenderer.renderMarkdown(disclaimerMd + r.renderedMarkdown, body, "", this);
     this.attachInternalLinkHandler(body);
   }
   /**
@@ -1201,6 +1213,9 @@ var ReportView = class extends import_obsidian.ItemView {
       cls: "vt-results-count",
       text: `${results.length} finding${results.length === 1 ? "" : "s"}`
     });
+    const disclaimerWrap = contentEl.createDiv({ cls: "vt-disclaimer-callout" });
+    disclaimerWrap.createEl("div", { cls: "callout", attr: { "data-callout": "info" } });
+    disclaimerWrap.createEl("p", { cls: "callout-content", text: AI_DISCLAIMER_TEXT });
     if (results.length === 0) {
       contentEl.createEl("p", {
         cls: "vt-empty-state",
@@ -1479,6 +1494,10 @@ var MainView = class extends import_obsidian2.ItemView {
     footer.createEl("span", {
       cls: "vt-last-analyzed",
       text: ts ? `Last analyzed: ${new Date(ts).toLocaleString()}` : "No analysis run yet"
+    });
+    footer.createEl("p", {
+      cls: "vt-disclaimer",
+      text: AI_DISCLAIMER_TEXT
     });
   }
   // ── Feature runners ──────────────────────────────────────────────────
@@ -1773,6 +1792,35 @@ var VaultTherapistSettingTab = class extends import_obsidian3.PluginSettingTab {
         })
       );
     }
+    if (p === "gemini") {
+      new import_obsidian3.Setting(body).setName("API Key").setDesc("Get from Google AI Studio. Stored locally.").addText((t) => {
+        t.inputEl.type = "password";
+        t.setPlaceholder("AIza...").setValue(settings.geminiApiKey).onChange(async (v) => {
+          settings.geminiApiKey = v.trim();
+          await this.plugin.saveSettings();
+        });
+      });
+      new import_obsidian3.Setting(body).setName("Model").setDesc("e.g. gemini-2.0-flash, gemini-1.5-pro").addText(
+        (t) => t.setPlaceholder("gemini-2.0-flash").setValue(settings.geminiModel).onChange(async (v) => {
+          settings.geminiModel = v.trim();
+          await this.plugin.saveSettings();
+        })
+      );
+    }
+    if (p === "lmstudio") {
+      new import_obsidian3.Setting(body).setName("Base URL").setDesc("LM Studio local server URL.").addText(
+        (t) => t.setPlaceholder("http://localhost:1234").setValue(settings.lmstudioBaseUrl).onChange(async (v) => {
+          settings.lmstudioBaseUrl = v.trim();
+          await this.plugin.saveSettings();
+        })
+      );
+      new import_obsidian3.Setting(body).setName("Model").setDesc("Model loaded in LM Studio (e.g. llama-3.2-1b-instruct)").addText(
+        (t) => t.setPlaceholder("llama-3.2-1b-instruct").setValue(settings.lmstudioModel).onChange(async (v) => {
+          settings.lmstudioModel = v.trim();
+          await this.plugin.saveSettings();
+        })
+      );
+    }
     const testStatusEl = this.appendStatusLine(body);
     new import_obsidian3.Setting(body).setName("Test Connection").setDesc("Ping the selected provider to verify your settings are correct.").addButton((btn) => {
       btn.setButtonText("Test").onClick(async () => {
@@ -1993,7 +2041,9 @@ var VaultTherapistSettingTab = class extends import_obsidian3.PluginSettingTab {
       ollama: "Ollama (Local)",
       openai: "OpenAI (BYOK)",
       anthropic: "Anthropic (BYOK)",
-      openrouter: "OpenRouter (BYOK)"
+      openrouter: "OpenRouter (BYOK)",
+      gemini: "Google Gemini (BYOK)",
+      lmstudio: "LMStudio (Local)"
     };
     return (_a = labels[provider]) != null ? _a : provider;
   }
@@ -2385,6 +2435,184 @@ var _OpenRouterProvider = class _OpenRouterProvider extends BaseAIProvider {
 _OpenRouterProvider.BASE_URL = "https://openrouter.ai/api/v1";
 var OpenRouterProvider = _OpenRouterProvider;
 
+// src/ai/providers/geminiProvider.ts
+var _GeminiProvider = class _GeminiProvider extends BaseAIProvider {
+  constructor(apiKey, model, embedModel = "text-embedding-004") {
+    super();
+    this.name = "Google Gemini";
+    this.supportsNativeEmbeddings = true;
+    this.apiKey = apiKey;
+    this.model = model;
+    this.embedModel = embedModel;
+  }
+  async complete(prompt, systemPrompt) {
+    var _a, _b, _c, _d;
+    const contents = [];
+    if (systemPrompt) {
+      contents.push({ role: "system", parts: [{ text: systemPrompt }] });
+    }
+    contents.push({ role: "user", parts: [{ text: prompt }] });
+    const url = `${_GeminiProvider.BASE_URL}/models/${this.model}:generateContent?key=${this.apiKey}`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents }),
+      signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS)
+    });
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Gemini error ${response.status}: ${err}`);
+    }
+    const data = await response.json();
+    const candidate = (_a = data.candidates) == null ? void 0 : _a[0];
+    if (!((_d = (_c = (_b = candidate == null ? void 0 : candidate.content) == null ? void 0 : _b.parts) == null ? void 0 : _c[0]) == null ? void 0 : _d.text)) {
+      throw new Error(`Gemini response missing content: ${JSON.stringify(data)}`);
+    }
+    return candidate.content.parts[0].text;
+  }
+  async embed(text) {
+    const [vector] = await this.embedBatch([text]);
+    return vector;
+  }
+  async embedBatch(texts) {
+    var _a;
+    const requests = texts.map((text) => ({
+      model: `models/${this.embedModel}`,
+      content: { parts: [{ text }] }
+    }));
+    const url = `${_GeminiProvider.BASE_URL}/models/${this.embedModel}:batchEmbedContents?key=${this.apiKey}`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requests }),
+      signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS)
+    });
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Gemini embed error ${response.status}: ${err}`);
+    }
+    const data = await response.json();
+    const embeddings = (_a = data.embeddings) != null ? _a : [];
+    return embeddings.map((e) => {
+      var _a2;
+      return (_a2 = e.values) != null ? _a2 : [];
+    });
+  }
+  async testConnection() {
+    if (!this.apiKey)
+      return false;
+    try {
+      const url = `${_GeminiProvider.BASE_URL}/models?key=${this.apiKey}`;
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(5e3)
+      });
+      return response.ok;
+    } catch (e) {
+      return false;
+    }
+  }
+};
+_GeminiProvider.BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+var GeminiProvider = _GeminiProvider;
+
+// src/ai/providers/lmstudioProvider.ts
+var _LMStudioProvider = class _LMStudioProvider extends BaseAIProvider {
+  constructor(baseUrl, model) {
+    super();
+    this.name = "LMStudio";
+    this._supportsNativeEmbeddings = false;
+    this.probedForEmbeddings = false;
+    this.baseUrl = baseUrl || _LMStudioProvider.DEFAULT_BASE_URL;
+    this.model = model;
+  }
+  get supportsNativeEmbeddings() {
+    return this._supportsNativeEmbeddings;
+  }
+  async complete(prompt, systemPrompt) {
+    var _a, _b, _c;
+    const messages = this.buildMessages(prompt, systemPrompt);
+    const response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: this.model, messages }),
+      signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS)
+    });
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`LMStudio error ${response.status}: ${err}`);
+    }
+    const data = await response.json();
+    return (_c = (_b = (_a = data.choices[0]) == null ? void 0 : _a.message) == null ? void 0 : _b.content) != null ? _c : "";
+  }
+  async embed(text) {
+    const [vector] = await this.embedBatch([text]);
+    return vector;
+  }
+  async embedBatch(texts) {
+    var _a, _b;
+    if (!this.probedForEmbeddings) {
+      await this.probeEmbeddings();
+    }
+    if (!this._supportsNativeEmbeddings) {
+      throw new Error("LMStudio: embeddings not supported with the currently loaded model");
+    }
+    const response = await fetch(`${this.baseUrl}/v1/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: this.model, input: texts }),
+      signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS)
+    });
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`LMStudio embed error ${response.status}: ${err}`);
+    }
+    const data = await response.json();
+    return (_b = (_a = data.data) == null ? void 0 : _a.map((d) => d.embedding)) != null ? _b : [];
+  }
+  async testConnection() {
+    try {
+      const response = await fetch(`${this.baseUrl}/v1/models`, {
+        signal: AbortSignal.timeout(5e3)
+      });
+      if (!response.ok)
+        return false;
+      if (!this.probedForEmbeddings) {
+        await this.probeEmbeddings();
+      }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  async probeEmbeddings() {
+    this.probedForEmbeddings = true;
+    try {
+      const response = await fetch(`${this.baseUrl}/v1/embeddings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: this.model, input: ["test"] }),
+        signal: AbortSignal.timeout(5e3)
+      });
+      if (response.ok) {
+        this._supportsNativeEmbeddings = true;
+      } else {
+        const err = await response.text();
+        if (err.includes("not supported") || err.includes("model does not support")) {
+          this._supportsNativeEmbeddings = false;
+        } else if (response.status === 400 || response.status === 404) {
+          this._supportsNativeEmbeddings = false;
+        } else {
+          throw new Error(`LMStudio embed probe failed: ${response.status}`);
+        }
+      }
+    } catch (e) {
+      this._supportsNativeEmbeddings = false;
+    }
+  }
+};
+_LMStudioProvider.DEFAULT_BASE_URL = "http://localhost:1234";
+var LMStudioProvider = _LMStudioProvider;
+
 // src/ai/aiManager.ts
 var AIManager = class {
   constructor(settings) {
@@ -2406,6 +2634,10 @@ var AIManager = class {
         return new AnthropicProvider(settings.anthropicApiKey, settings.anthropicModel);
       case "openrouter":
         return new OpenRouterProvider(settings.openrouterApiKey, settings.openrouterModel);
+      case "gemini":
+        return new GeminiProvider(settings.geminiApiKey, settings.geminiModel);
+      case "lmstudio":
+        return new LMStudioProvider(settings.lmstudioBaseUrl, settings.lmstudioModel);
       default: {
         const exhaustive = settings.aiProvider;
         throw new Error(`Unknown AI provider: ${String(exhaustive)}`);
