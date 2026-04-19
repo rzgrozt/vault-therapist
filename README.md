@@ -32,6 +32,10 @@ Vault Therapist reads the notes in your vault and runs four AI-powered analyses 
 
 Read the full privacy policy: https://vaulttherapist.com/privacy
 
+## AI Disclaimer
+
+Vault Therapist uses AI models to generate suggestions and analysis results. All AI output should be treated as suggestions, not authoritative conclusions. Always verify recommendations against your actual notes before making changes to your vault.
+
 ## Install
 
 Once accepted to the Obsidian community plugin directory:
@@ -87,6 +91,26 @@ Single account, dozens of models (including free tiers).
 2. In settings, pick **OpenRouter**, paste the key, set model (default `google/gemma-4-31b-it:free`).
 3. Test connection.
 
+### Google Gemini
+
+ Google's in-house model family. Fast and cost-effective.
+
+1. Get an API key from https://aistudio.google.com/app/apikey.
+2. In settings, pick **Google Gemini**, paste the key, set model (default `gemini-2.0-flash`).
+3. Test connection.
+
+### LMStudio (local)
+
+ Run LLMs locally on your machine with a polished app. No API key needed — just start the local server.
+
+1. Download LM Studio from https://lmstudio.ai/download.
+2. Open LM Studio and load a model (e.g. Llama 3.2, Mistral).
+3. Click **Start Server** (the local API icon on the left sidebar).
+4. In Vault Therapist settings, pick **LMStudio**, set Base URL to `http://localhost:1234` (default), enter the model name exactly as shown in LM Studio.
+5. Test connection.
+
+> **Note**: Embeddings depend on the loaded model — not all models support embeddings. The plugin will probe automatically on first use and disable embeddings if the model doesn't support them.
+
 ## Pricing
 
 |              | Trial           | Lifetime license                |
@@ -106,10 +130,12 @@ Only if you pick a cloud AI provider. With Ollama, nothing ever leaves your mach
 
 **Which provider should I pick?**
 
-- Privacy > everything: **Ollama**.
+- Privacy > everything: **Ollama** or **LMStudio**.
 - Best general results for the price: **OpenAI** (`gpt-4o`).
 - Best for subtle contradictions: **Anthropic** (`claude-4-5-haiku`).
 - Want to try many models on one bill, including free tiers: **OpenRouter**.
+- Fast, cheap, Google's model family: **Google Gemini**.
+- Want to run everything locally with a GUI: **LMStudio**.
 
 **What happens when the trial expires?**
 Analyses are gated, but the plugin keeps loading cleanly. Settings stay accessible so you can enter a license. No features crash, no data is lost, and you can uninstall without side effects.
