@@ -16,7 +16,7 @@ Vault Therapist reads the notes in your vault and runs four AI-powered analyses 
 - **Contradiction detector** — finds pairs of notes that make conflicting claims, with a confidence score and a plain-English explanation.
 - **Knowledge gap finder** — scans clusters of notes around a topic and highlights what's missing or underdeveloped.
 - **Weekly insight report** — themes, patterns, and recommendations across your vault, generated on demand.
-- **Four AI providers** — Ollama (100% local), OpenAI, Anthropic, OpenRouter. Your notes never go anywhere you don't authorize.
+- **Six AI providers** — Ollama (100% local), OpenAI, Anthropic, OpenRouter, Gemini, LM Studio (local). Your notes never go anywhere you don't authorize.
 - **Embedding-powered similarity** — once, then cached. Large vaults process incrementally.
 
 ## Data privacy & network use
