@@ -1986,7 +1986,7 @@ var VaultTherapistSettingTab = class extends import_obsidian3.PluginSettingTab {
       const activateStatusEl = this.appendStatusLine(body);
       new import_obsidian3.Setting(body).setName("License Key").setDesc("Enter your Vault Therapist license key.").addText((t) => {
         t.inputEl.type = "password";
-        t.setPlaceholder("VT-XXXX-XXXX-XXXX-XXXX").setValue(this.plugin.settings.licenseKey).onChange(async (v) => {
+        t.setPlaceholder("Paste your license key").setValue(this.plugin.settings.licenseKey).onChange(async (v) => {
           this.plugin.settings.licenseKey = v.trim();
           await this.plugin.saveSettings();
         });
@@ -2013,7 +2013,7 @@ var VaultTherapistSettingTab = class extends import_obsidian3.PluginSettingTab {
               this.display();
             } else if (outcome === "bad-format") {
               activateStatusEl.className = "vt-inline-status vt-status-err";
-              activateStatusEl.textContent = "\u2717  Wrong format \u2014 expected VT-XXXX-XXXX-XXXX-XXXX.";
+              activateStatusEl.textContent = "\u2717  Invalid key format \u2014 please check and try again.";
             } else {
               activateStatusEl.className = "vt-inline-status vt-status-err";
               activateStatusEl.textContent = "\u2717  Invalid key \u2014 please check and try again.";
@@ -3595,10 +3595,10 @@ var LicenseModal = class extends import_obsidian6.Modal {
     });
     if (!status.isValid) {
       let keyValue = "";
-      new import_obsidian6.Setting(contentEl).setName("License Key").setDesc("Format: VT-XXXX-XXXX-XXXX-XXXX").addText((text) => {
+      new import_obsidian6.Setting(contentEl).setName("License Key").setDesc("License keys are emailed after purchase").addText((text) => {
         text.inputEl.type = "password";
         text.inputEl.style.width = "100%";
-        text.setPlaceholder("VT-XXXX-XXXX-XXXX-XXXX").onChange((v) => {
+        text.setPlaceholder("Paste your license key").onChange((v) => {
           keyValue = v.trim();
         });
       });
@@ -3628,7 +3628,7 @@ var LicenseModal = class extends import_obsidian6.Modal {
           this.onActivated();
           this.close();
         } else if (outcome === "bad-format") {
-          new import_obsidian6.Notice("\u2717 That doesn't look like a valid license key format (VT-XXXX-XXXX-XXXX-XXXX).");
+          new import_obsidian6.Notice("\u2717 That doesn't look like a valid license key format.");
           activateBtn.textContent = "Activate License";
           activateBtn.disabled = false;
         } else {
