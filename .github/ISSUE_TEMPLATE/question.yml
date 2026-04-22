@@ -1,0 +1,48 @@
+name: Question
+description: Ask a question about using Vault Therapist.
+labels: ["question", "triage"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What would you like to know?
+      placeholder: e.g., "How do I configure the AI provider for local models?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What You've Already Tried
+      description: Describe any steps you've already taken to find the answer.
+      placeholder: e.g., "I checked the README and tried restarting Obsidian."
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin Version
+      description: e.g., 1.1.0
+
+  - type: input
+    id: obsidian-version
+    attributes:
+      label: Obsidian Version
+      description: e.g., v1.5.3
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - macOS
+        - Windows
+        - Linux
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have searched existing issues and documentation before asking.
+          required: true

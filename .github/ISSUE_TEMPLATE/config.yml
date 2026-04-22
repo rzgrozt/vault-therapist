@@ -1,0 +1,13 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Vault Therapist Documentation
+    url: https://vaulttherapist.com/docs
+    about: Check the official documentation for usage guides and FAQs.
+
+  - name: Obsidian Forum Thread
+    url: https://forum.obsidian.md/
+    about: Discuss Vault Therapist with the broader Obsidian community.
+
+  - name: Email Support
+    url: mailto:support@vaulttherapist.com
+    about: Reach out directly for private or account-related issues.

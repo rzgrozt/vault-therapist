@@ -1,0 +1,111 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in Vault Therapist.
+labels: ["bug", "triage"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Clear Short Description
+      description: Summarize the bug in one or two sentences.
+      placeholder: e.g., "Analysis fails with 'undefined' error when vault has empty notes."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: plugin-version
+    attributes:
+      label: Plugin Version
+      description: Which version of Vault Therapist are you running?
+      options:
+        - 1.1.0
+        - 1.0.0
+        - other
+    validations:
+      required: true
+
+  - type: input
+    id: obsidian-version
+    attributes:
+      label: Obsidian Version
+      description: e.g., v1.5.3
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - macOS
+        - Windows
+        - Linux
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ai-provider
+    attributes:
+      label: AI Provider in Use
+      options:
+        - Ollama
+        - LMStudio
+        - OpenAI
+        - Anthropic
+        - Gemini
+        - OpenRouter
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Provide step-by-step instructions to reproduce the issue.
+      placeholder: |
+        1. Open Obsidian
+        2. Run "Analyze Vault"
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+      placeholder: Describe the expected outcome.
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened?
+      placeholder: Describe what actually happened.
+    validations:
+      required: true
+
+  - type: textarea
+    id: console
+    attributes:
+      label: Console Output (if any)
+      description: Paste any relevant output from the Obsidian Developer Console (Ctrl+Shift+I / Cmd+Option+I).
+      placeholder: |
+        ```
+        Paste console output here...
+        ```
+      render: shell
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: If applicable, add screenshots to help explain the problem.
+      placeholder: Drag and drop images here.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have searched existing issues and this bug has not been reported yet.
+          required: true

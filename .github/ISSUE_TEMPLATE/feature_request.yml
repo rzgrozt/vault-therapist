@@ -1,0 +1,42 @@
+name: Feature Request
+description: Suggest a new feature or enhancement for Vault Therapist.
+labels: ["enhancement", "triage"]
+body:
+  - type: input
+    id: description
+    attributes:
+      label: Short Feature Description
+      description: A concise summary of the feature.
+      placeholder: e.g., "Add support for custom AI model endpoints."
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem It Solves
+      description: What problem does this feature solve? Why is it needed?
+      placeholder: Describe the pain point or gap this feature addresses.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe how you envision this feature working.
+      placeholder: Detailed description of the proposed implementation or behavior.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Have you considered any alternative approaches or workarounds?
+      placeholder: Describe other options you've thought about.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Any other context, mockups, or references.
+      placeholder: Add any extra information here.
