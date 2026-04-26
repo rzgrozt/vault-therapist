@@ -16,7 +16,7 @@ Vault Therapist reads the notes in your vault and runs four AI-powered analyses 
 - **Contradiction detector** — finds pairs of notes that make conflicting claims, with a confidence score and a plain-English explanation.
 - **Knowledge gap finder** — scans clusters of notes around a topic and highlights what's missing or underdeveloped.
 - **Weekly insight report** — themes, patterns, and recommendations across your vault, generated on demand.
-- **Six AI providers** — Ollama (100% local), OpenAI, Anthropic, OpenRouter, Gemini, LM Studio (local). Your notes never go anywhere you don't authorize.
+- **Four AI providers** — Ollama (100% local), OpenAI, Anthropic, OpenRouter. Your notes never go anywhere you don't authorize.
 - **Embedding-powered similarity** — once, then cached. Large vaults process incrementally.
 
 ## Data privacy & network use
@@ -151,6 +151,51 @@ The plugin source is in this repo under the Business Source License 1.1 (BUSL-1.
 
 **Can I use it on mobile?**
 Not yet — desktop only for now (`isDesktopOnly: true`). Mobile support is on the roadmap once embedding performance on-device is acceptable.
+
+## Troubleshooting
+
+### Embedding stalls or fails on large vaults (Ollama)
+
+Ollama runs embedding models in memory. On large vaults (500+ notes), the embedding model may exhaust available RAM or GPU memory mid-run, causing Ollama to stop responding.
+
+**What you'll see**: A notice like "Ollama stopped responding after embedding 996 of 1226 notes." The notes that were embedded before the failure are preserved — you don't lose progress.
+
+**How to fix it**:
+
+1. **Restart Ollama** and re-run. The plugin will skip notes that already have embeddings and continue from where it stopped.
+2. **Use a smaller embedding model**. `all-minilm` (22 MB) uses far less memory than `nomic-embed-text` (274 MB) and still produces good similarity results:
+   ```
+   ollama pull all-minilm
+   ```
+   Then set `all-minilm` as your embedding model in Vault Therapist settings.
+3. **Close other applications** to free memory, or re-run with fewer notes per batch.
+
+The plugin automatically retries a failed batch once and falls back to embedding notes one-at-a-time if the batch still fails.
+
+### Which providers support native embeddings?
+
+| Provider      | Native embeddings | Notes                                          |
+|---------------|-------------------|------------------------------------------------|
+| Ollama        | ✅ Yes            | Any model pulled via `ollama pull <model>`     |
+| OpenAI        | ✅ Yes            | Uses `text-embedding-3-small` automatically    |
+| Google Gemini | ✅ Yes            | Uses `text-embedding-004` automatically         |
+| LMStudio      | ⚠️ Varies         | Only when the loaded model supports embeddings  |
+| OpenRouter    | ❌ No             | Falls back to TF-IDF (approximate similarity)   |
+| Anthropic     | ❌ No             | Falls back to TF-IDF (approximate similarity)   |
+
+### What does "TF-IDF fallback" mean?
+
+When your AI provider doesn't offer a native embedding API (Anthropic, OpenRouter), Vault Therapist computes TF-IDF vectors instead. These use word-frequency statistics — they work for finding notes with overlapping keywords, but they're less accurate for semantic similarity than real neural embeddings. If you see a TF-IDF notice, consider switching to a provider with native embedding support for better results.
+
+### Recommended setup for very large vaults (1000+ notes)
+
+If you have a large vault and Ollama keeps running out of memory, **OpenAI's `text-embedding-3-small`** is the most cost-effective option:
+
+- **Cost**: ~$0.02 per 1M tokens — a 1000-note vault costs under $0.10 to embed.
+- **Speed**: Batches process in seconds, not minutes.
+- **Quality**: Better similarity results than TF-IDF or small local models.
+
+Set your AI provider to **OpenAI** in Vault Therapist settings. Your chat model can still be any provider (Ollama, Anthropic, etc.) — only embeddings need OpenAI.
 
 ## License
 

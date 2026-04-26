@@ -99,6 +99,9 @@ var import_obsidian3 = require("obsidian");
 function humanizeAIError(err, providerName) {
   const raw = err instanceof Error ? err.message : String(err);
   if (/aborted|timeout|timed out/i.test(raw)) {
+    if (providerName.toLowerCase() === "ollama") {
+      return `Ollama timed out while processing your request. This often means Ollama ran out of memory. Try: (1) restart Ollama, (2) use a smaller model, or (3) re-run with fewer notes.`;
+    }
     return `${providerName}: request timed out \u2014 check your network or the provider's status.`;
   }
   const statusMatch = raw.match(/error\s+(\d{3})\s*:\s*(.*)$/i);
@@ -109,7 +112,16 @@ function humanizeAIError(err, providerName) {
     return `${providerName}: ${reason} (HTTP ${status}) \u2014 ${tail}`;
   }
   if (/fetch|network|ENOTFOUND|ECONNREFUSED|Failed to fetch/i.test(raw)) {
-    return `${providerName}: cannot reach the service. Check your connection${providerName.toLowerCase() === "ollama" ? " and that Ollama is running" : ""}.`;
+    if (providerName.toLowerCase() === "ollama") {
+      return `Cannot reach Ollama at the configured URL. Make sure Ollama is running ("ollama serve" or the tray app) and the URL in settings is correct.`;
+    }
+    return `${providerName}: cannot reach the service. Check your connection.`;
+  }
+  if (/out of memory|OOM|cuda.*memory|metal.*memory/i.test(raw)) {
+    return `Ollama ran out of memory while generating embeddings. Try: (1) use a smaller embedding model like all-minilm, (2) close other applications to free RAM, or (3) re-run to continue.`;
+  }
+  if (/batch embed failed|sequential fallback/i.test(raw)) {
+    return `${providerName} stopped responding during embedding generation. Some notes were embedded before the error occurred. Re-run to continue from where it stopped.`;
   }
   const clipped = raw.length > 200 ? `${raw.slice(0, 200)}\u2026` : raw;
   return `${providerName}: ${clipped}`;
@@ -1354,11 +1366,6 @@ var MainView = class extends import_obsidian2.ItemView {
     this.renderReportButton(contentEl);
     this.renderFooter(contentEl);
   }
-  /**
-   * Warn the user when a substantial portion of their vault has no embeddings.
-   * Semantic features (orphan, contradiction) silently degrade otherwise —
-   * this banner surfaces the state and offers a one-click fix.
-   */
   renderEmbeddingBanner(parent) {
     const notes = this.vaultReader.getAllNotes();
     const total = notes.length;
@@ -1403,26 +1410,54 @@ var MainView = class extends import_obsidian2.ItemView {
         notesMissing,
         MAX_EMBEDDING_NOTES_PER_RUN
       );
-      if (summary.fallback) {
-        new import_obsidian2.Notice(
-          `\u26A0 Native embeddings were NOT generated. ${this.aiManager.providerName} is unavailable, so ${summary.processed} TF-IDF fallback vector(s) were computed instead. Start the provider and re-run to generate real embeddings.`,
-          12e3
-        );
-      } else if (summary.skipped > 0) {
-        new import_obsidian2.Notice(
-          `Embedded ${summary.processed} most-recent note(s). ${summary.skipped} remaining \u2014 re-run "Generate embeddings" to continue.`,
-          1e4
-        );
-      } else {
-        new import_obsidian2.Notice(`Embedded ${summary.processed} note(s).`);
+      if (summary.status === "native") {
+        if (summary.skipped > 0) {
+          new import_obsidian2.Notice(
+            `Embedded ${summary.processed} note(s). ${summary.skipped} remaining \u2014 re-run "Generate embeddings" to continue.`,
+            1e4
+          );
+        } else {
+          new import_obsidian2.Notice(`Embedded ${summary.processed} note(s).`);
+        }
+      } else if (summary.status === "partial") {
+        const partialNotice = this.createPartialNotice(summary);
+        new import_obsidian2.Notice(partialNotice.title, 15e3);
+        if (partialNotice.details) {
+          new import_obsidian2.Notice(partialNotice.details, 2e4);
+        }
+      } else if (summary.status === "tfidf") {
+        new import_obsidian2.Notice(summary.message, 12e3);
       }
     } catch (err) {
       this.logger.error(`Embedding generation failed: ${String(err)}`);
-      new import_obsidian2.Notice(humanizeAIError(err, this.aiManager.providerName));
+      const providerName = this.aiManager.providerName;
+      const rawError = err instanceof Error ? err.message : String(err);
+      const friendlyMessage = humanizeAIError(err, providerName);
+      new import_obsidian2.Notice(friendlyMessage, 12e3);
+      if (rawError !== friendlyMessage) {
+        new import_obsidian2.Notice(`Details: ${rawError.slice(0, 200)}`, 15e3);
+      }
     } finally {
       this.activeFeature = null;
       this.render();
     }
+  }
+  createPartialNotice(summary) {
+    const failedPaths = summary.failedPaths;
+    const title = summary.message;
+    if (failedPaths.length > 0 && failedPaths.length <= 5) {
+      return {
+        title,
+        details: `Failed notes: ${failedPaths.join(", ")}`
+      };
+    }
+    if (failedPaths.length > 5) {
+      return {
+        title,
+        details: `${failedPaths.length} notes failed to embed. Re-run to continue from where it stopped.`
+      };
+    }
+    return { title, details: null };
   }
   renderHeader(parent) {
     var _a, _b;
@@ -1882,8 +1917,7 @@ var VaultTherapistSettingTab = class extends import_obsidian3.PluginSettingTab {
       });
       ta.inputEl.rows = 2;
     });
-    let minLengthSetting;
-    minLengthSetting = new import_obsidian3.Setting(body).setName("Minimum Note Length").setDesc(`Notes shorter than ${settings.minNoteLengthForAnalysis} characters are skipped.`).addSlider(
+    const minLengthSetting = new import_obsidian3.Setting(body).setName("Minimum Note Length").setDesc(`Notes shorter than ${settings.minNoteLengthForAnalysis} characters are skipped.`).addSlider(
       (sl) => sl.setLimits(50, 500, 50).setValue(settings.minNoteLengthForAnalysis).setDynamicTooltip().onChange(async (v) => {
         settings.minNoteLengthForAnalysis = v;
         minLengthSetting.setDesc(`Notes shorter than ${v} characters are skipped.`);
@@ -1926,10 +1960,7 @@ var VaultTherapistSettingTab = class extends import_obsidian3.PluginSettingTab {
             MAX_EMBEDDING_NOTES_PER_RUN
           );
           const finalDone = batchNotes.filter((n) => n.embedding && n.embedding.length > 0).length;
-          if (summary.fallback) {
-            progressEl.className = "vt-embed-progress vt-embed-progress--error";
-            progressEl.textContent = `\u26A0 Native embeddings NOT generated \u2014 ${this.plugin.aiManager.providerName} call failed. Computed ${summary.processed} TF-IDF fallback vector(s) instead. Start the provider and re-run to generate real embeddings.`;
-          } else {
+          if (summary.status === "native") {
             this.embeddingLastGeneratedAt = Date.now();
             coverageEl.setText(`${finalDone} / ${batchTotal} notes have embeddings`);
             lastGenEl.setText(`Last generated: ${new Date(this.embeddingLastGeneratedAt).toLocaleString()}`);
@@ -1939,6 +1970,12 @@ var VaultTherapistSettingTab = class extends import_obsidian3.PluginSettingTab {
             } else {
               progressEl.textContent = `Done \u2014 ${summary.processed} notes embedded`;
             }
+          } else if (summary.status === "partial") {
+            progressEl.className = "vt-embed-progress vt-embed-progress--error";
+            progressEl.textContent = summary.message;
+          } else if (summary.status === "tfidf") {
+            progressEl.className = "vt-embed-progress vt-embed-progress--error";
+            progressEl.textContent = summary.message;
           }
         } catch (e) {
           progressEl.className = "vt-embed-progress vt-embed-progress--error";
@@ -2108,7 +2145,7 @@ var BaseAIProvider = class {
 };
 
 // src/ai/providers/ollamaProvider.ts
-var OllamaProvider = class extends BaseAIProvider {
+var _OllamaProvider = class _OllamaProvider extends BaseAIProvider {
   constructor(baseUrl, model, embeddingModel) {
     super();
     this.name = "Ollama";
@@ -2139,15 +2176,48 @@ var OllamaProvider = class extends BaseAIProvider {
     const [vector] = await this.embedBatch([text]);
     return vector;
   }
-  // ── Batch embed ──────────────────────────────────────────────────
+  // ── Batch embed with retry + sequential fallback ─────────────────
   async embedBatch(texts) {
     if (this.embedEndpointIsNew === null) {
       this.embedEndpointIsNew = await this.detectEmbedEndpoint();
     }
-    if (this.embedEndpointIsNew) {
-      return this.embedBatchNew(texts);
+    try {
+      if (this.embedEndpointIsNew) {
+        return await this.embedBatchNew(texts);
+      }
+      return await this.embedBatchLegacy(texts);
+    } catch (batchErr) {
+      const batchErrorMsg = batchErr instanceof Error ? batchErr.message : String(batchErr);
+      this.logger.warn(
+        `Ollama batch embed failed (${texts.length} texts). Retrying once after 1s delay\u2026`
+      );
+      await this.delay(_OllamaProvider.BATCH_RETRY_DELAY_MS);
+      try {
+        if (this.embedEndpointIsNew) {
+          return await this.embedBatchNew(texts);
+        }
+        return await this.embedBatchLegacy(texts);
+      } catch (retryErr) {
+        const retryErrorMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        this.logger.warn(
+          `Ollama batch retry also failed. Falling back to sequential embedding for ${texts.length} texts.`
+        );
+        const results = [];
+        for (let i = 0; i < texts.length; i++) {
+          const single = await this.embedSingleWithRetry(texts[i]);
+          if (single.vector) {
+            results.push(single.vector);
+          } else {
+            throw new EmbedBatchError(
+              `Ollama batch embed failed and ${i} of ${texts.length} notes could not be embedded individually. Batch error: ${batchErrorMsg}. Retry error: ${retryErrorMsg}. Last single-note error: ${single.error}`,
+              i
+              // how many we did manage to embed before this one failed
+            );
+          }
+        }
+        return results;
+      }
     }
-    return this.embedBatchLegacy(texts);
   }
   // ── Connection test ──────────────────────────────────────────────
   async testConnection() {
@@ -2162,6 +2232,39 @@ var OllamaProvider = class extends BaseAIProvider {
     }
   }
   // ── Private helpers ──────────────────────────────────────────────
+  async embedSingleWithRetry(text) {
+    try {
+      if (this.embedEndpointIsNew) {
+        const response = await fetch(`${this.baseUrl}/api/embed`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: this.embeddingModel, input: [text] }),
+          signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS)
+        });
+        if (!response.ok) {
+          const errBody = await response.text();
+          return { vector: null, error: `Ollama embed error ${response.status}: ${errBody}` };
+        }
+        const data = await response.json();
+        return { vector: data.embeddings[0], error: null };
+      } else {
+        const response = await fetch(`${this.baseUrl}/api/embeddings`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: this.embeddingModel, prompt: text }),
+          signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS)
+        });
+        if (!response.ok) {
+          const errBody = await response.text();
+          return { vector: null, error: `Ollama embed error ${response.status}: ${errBody}` };
+        }
+        const data = await response.json();
+        return { vector: data.embedding, error: null };
+      }
+    } catch (err) {
+      return { vector: null, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
   async detectEmbedEndpoint() {
     try {
       const response = await fetch(`${this.baseUrl}/api/embed`, {
@@ -2207,6 +2310,18 @@ var OllamaProvider = class extends BaseAIProvider {
       results.push(data.embedding);
     }
     return results;
+  }
+  delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+};
+_OllamaProvider.BATCH_RETRY_DELAY_MS = 1e3;
+var OllamaProvider = _OllamaProvider;
+var EmbedBatchError = class extends Error {
+  constructor(message, embeddedSoFar) {
+    super(message);
+    this.name = "EmbedBatchError";
+    this.embeddedSoFar = embeddedSoFar;
   }
 };
 
@@ -2619,7 +2734,6 @@ var AIManager = class {
     this.logger = new Logger("AIManager");
     this.provider = this.buildProvider(settings);
   }
-  // ── Lazy factory ──────────────────────────────────────────────────
   buildProvider(settings) {
     switch (settings.aiProvider) {
       case "ollama":
@@ -2654,34 +2768,28 @@ var AIManager = class {
     this.logger.debug(`complete() via ${this.provider.name}`);
     return this.provider.complete(prompt, systemPrompt);
   }
-  // ── Embeddings (null on unsupported provider) ────────────────────
+  // ── Embeddings ──────────────────────────────────────────────────
   /** Returns a single embedding vector, or null if the provider doesn't support embeddings. */
   async embed(text) {
     if (!this.provider.supportsNativeEmbeddings) {
       this.logger.debug(`embed() skipped \u2014 ${this.provider.name} does not support native embeddings`);
       return null;
     }
-    try {
-      this.logger.debug(`embed() via ${this.provider.name}`);
-      return await this.provider.embed(text);
-    } catch (err) {
-      this.logger.warn(`embed() failed on ${this.provider.name}: ${String(err)}`);
-      return null;
-    }
+    this.logger.debug(`embed() via ${this.provider.name}`);
+    return this.provider.embed(text);
   }
-  /** Returns a batch of embedding vectors, or null if the provider doesn't support embeddings. */
+  /**
+   * Returns a batch of embedding vectors.
+   * Throws on failure — the caller (EmbeddingManager) handles partial-progress recovery.
+   * Returns null only when the provider doesn't support native embeddings at all.
+   */
   async embedBatch(texts) {
     if (!this.provider.supportsNativeEmbeddings) {
       this.logger.debug(`embedBatch() skipped \u2014 ${this.provider.name} does not support native embeddings`);
       return null;
     }
-    try {
-      this.logger.debug(`embedBatch() via ${this.provider.name} (${texts.length} texts)`);
-      return await this.provider.embedBatch(texts);
-    } catch (err) {
-      this.logger.warn(`embedBatch() failed on ${this.provider.name}: ${String(err)}`);
-      return null;
-    }
+    this.logger.debug(`embedBatch() via ${this.provider.name} (${texts.length} texts)`);
+    return this.provider.embedBatch(texts);
   }
   // ── Availability ─────────────────────────────────────────────────
   async testConnection() {
@@ -2703,25 +2811,39 @@ var EmbeddingManager = class {
     this.tfidf = null;
     /** Cache key: content hash → embedding, for incremental updates. */
     this.embeddingCache = /* @__PURE__ */ new Map();
+    /** Paths that failed to get an embedding in the most recent run. */
+    this.lastFailedPaths = [];
     this.aiManager = aiManager;
   }
   // ── Vault-wide embedding generation ──────────────────────────────
   /**
-   * Generate embeddings for all notes. Uses native embeddings when the
-   * active provider supports them; falls back to TF-IDF otherwise.
+   * Generate embeddings for all notes.
    *
-   * Does NOT run on startup — called explicitly from the UI.
+   * Three possible outcomes:
+   *  - `status: 'native'` — all notes got real neural embeddings
+   *  - `status: 'partial'` — native provider failed partway; some notes got
+   *    real embeddings, the rest have none. Re-run to continue.
+   *  - `status: 'tfidf'` — provider doesn't support native embeddings
+   *    (Anthropic, OpenRouter), so TF-IDF was used intentionally.
    */
   async generateAllEmbeddings(notes, maxNotes) {
     const totalRequested = notes.length;
+    this.lastFailedPaths = [];
     if (totalRequested === 0) {
-      return { processed: 0, skipped: 0, totalRequested: 0, native: false, fallback: false };
+      return {
+        processed: 0,
+        skipped: 0,
+        totalRequested: 0,
+        status: "native",
+        message: "",
+        failedPaths: []
+      };
     }
     if (this.aiManager.supportsNativeEmbeddings) {
       const reachable = await this.aiManager.testConnection();
       if (!reachable) {
         throw new Error(
-          `${this.aiManager.providerName} is not reachable. Embeddings were not generated. Start the provider or check your connection settings and try again.`
+          `${this.aiManager.providerName} is not reachable. Embeddings were not generated. Check that ${this.aiManager.providerName} is running and try again.`
         );
       }
     }
@@ -2737,23 +2859,24 @@ var EmbeddingManager = class {
     this.logger.info(
       `Generating embeddings for ${target.length} notes via ${this.aiManager.providerName}`
     );
-    let native = false;
-    let fallback = false;
-    if (this.aiManager.supportsNativeEmbeddings) {
-      const ok = await this.generateNativeEmbeddings(target);
-      native = ok;
-      fallback = !ok;
-    } else {
+    if (!this.aiManager.supportsNativeEmbeddings) {
       this.generateTfidfEmbeddings(target);
-      fallback = true;
+      return {
+        processed: target.length,
+        skipped,
+        totalRequested,
+        status: "tfidf",
+        message: this.buildTfidfMessage(target.length, this.aiManager.providerName),
+        failedPaths: []
+      };
     }
-    return { processed: target.length, skipped, totalRequested, native, fallback };
+    return this.generateNativeEmbeddings(target, skipped, totalRequested);
+  }
+  /** Return the paths that failed to embed in the most recent run. */
+  getFailedEmbeddingPaths() {
+    return [...this.lastFailedPaths];
   }
   // ── Consumer-facing similarity search ────────────────────────────
-  /**
-   * Find the `topK` most similar notes to `target`.
-   * Works with both native embeddings and TF-IDF vectors.
-   */
   findSimilarNotes(target, allNotes, topK = 5) {
     const targetVec = target.embedding;
     if (!targetVec) {
@@ -2773,33 +2896,87 @@ var EmbeddingManager = class {
     this.embeddingCache.clear();
     this.tfidf = null;
   }
-  // ── Native embedding path ───────────────────────────────────────
-  async generateNativeEmbeddings(notes) {
+  // ── Native embedding path with partial-failure recovery ───────────
+  async generateNativeEmbeddings(notes, skipped, totalRequested) {
     const BATCH_SIZE2 = 10;
     const BATCH_DELAY_MS2 = 100;
+    const providerName = this.aiManager.providerName;
+    let embeddedCount = 0;
+    const failedPaths = [];
     for (let i = 0; i < notes.length; i += BATCH_SIZE2) {
       const batch = notes.slice(i, i + BATCH_SIZE2);
       const texts = batch.map((n) => this.buildEmbeddingText(n));
-      const vectors = await this.aiManager.embedBatch(texts);
-      if (!vectors) {
-        this.logger.warn("Native embedBatch returned null \u2014 falling back to TF-IDF");
-        this.generateTfidfEmbeddings(notes);
-        return false;
-      }
-      for (let j = 0; j < batch.length; j++) {
-        batch[j].embedding = vectors[j];
-        this.embeddingCache.set(this.cacheKey(batch[j]), vectors[j]);
+      try {
+        const vectors = await this.aiManager.embedBatch(texts);
+        if (!vectors) {
+          this.logger.warn(
+            `${providerName} returned null from embedBatch despite claiming native embedding support. Skipping remaining ${notes.length - embeddedCount} notes.`
+          );
+          for (const note of notes.slice(i)) {
+            failedPaths.push(note.path);
+          }
+          break;
+        }
+        for (let j = 0; j < batch.length; j++) {
+          batch[j].embedding = vectors[j];
+          this.embeddingCache.set(this.cacheKey(batch[j]), vectors[j]);
+        }
+        embeddedCount += batch.length;
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        if (err instanceof EmbedBatchError) {
+          this.logger.warn(
+            `${providerName} sequential fallback partially succeeded: ${err.embeddedSoFar} of ${batch.length} in batch. Stopping embedding run.`
+          );
+          for (const note of notes.slice(i)) {
+            failedPaths.push(note.path);
+          }
+          embeddedCount += err.embeddedSoFar;
+          break;
+        }
+        this.logger.warn(
+          `${providerName} embedding batch failed at note ${i + 1}/${notes.length}: ${errorMsg}`
+        );
+        for (const note of notes.slice(i)) {
+          failedPaths.push(note.path);
+        }
+        break;
       }
       if (i + BATCH_SIZE2 < notes.length) {
         await this.delay(BATCH_DELAY_MS2);
       }
     }
-    this.logger.info(`Native embeddings complete for ${notes.length} notes`);
-    return true;
+    this.lastFailedPaths = failedPaths;
+    const allSucceeded = failedPaths.length === 0;
+    if (allSucceeded) {
+      this.logger.info(`Native embeddings complete for ${embeddedCount} notes`);
+      return {
+        processed: embeddedCount,
+        skipped,
+        totalRequested,
+        status: "native",
+        message: "",
+        failedPaths: []
+      };
+    }
+    const message = this.buildPartialMessage(
+      providerName,
+      embeddedCount,
+      totalRequested,
+      failedPaths.length
+    );
+    return {
+      processed: embeddedCount,
+      skipped,
+      totalRequested,
+      status: "partial",
+      message,
+      failedPaths
+    };
   }
-  // ── TF-IDF fallback path ─────────────────────────────────────────
+  // ── TF-IDF intentional fallback path ──────────────────────────────
   generateTfidfEmbeddings(notes) {
-    this.logger.info("Using TF-IDF fallback for embeddings");
+    this.logger.info("Using TF-IDF for embeddings (provider does not support native embeddings)");
     const tokenizedNotes = notes.map((n) => this.tokenize(n));
     const vocab = this.buildVocabulary(tokenizedNotes, 2e3);
     const idf = this.computeIdf(tokenizedNotes, vocab);
@@ -2810,6 +2987,14 @@ var EmbeddingManager = class {
       this.embeddingCache.set(this.cacheKey(notes[i]), vec);
     }
     this.logger.info(`TF-IDF embeddings complete for ${notes.length} notes (${vocab.length} terms)`);
+  }
+  // ── User-facing message builders ─────────────────────────────────
+  buildPartialMessage(providerName, embeddedCount, totalRequested, failedCount) {
+    const providerSpecific = providerName === "Ollama" ? "This often happens when Ollama runs out of memory. Try: (1) restart Ollama, (2) use a smaller embedding model like all-minilm, or (3) re-run to continue from where it stopped." : `${providerName} stopped responding while generating embeddings. Try: (1) check your API key and network, (2) re-run to continue from where it stopped.`;
+    return `${providerName} stopped responding after embedding ${embeddedCount} of ${totalRequested} notes. ${failedCount} note(s) did not get embeddings. ${providerSpecific}`;
+  }
+  buildTfidfMessage(noteCount, providerName) {
+    return `${providerName} does not provide a native embedding API. Computed ${noteCount} TF-IDF vector(s) instead \u2014 similarity results will be approximate. For better results, switch to a provider with embedding support (Ollama with nomic-embed-text, OpenAI, or Google Gemini).`;
   }
   // ── TF-IDF internals ────────────────────────────────────────────
   tokenize(note) {
