@@ -61,7 +61,7 @@ var DEFAULT_MODELS = {
   anthropic: "claude-4-5-haiku",
   openrouter: "google/gemma-4-31b-it:free",
   gemini: "gemini-2.0-flash",
-  geminiEmbedding: "text-embedding-004",
+  geminiEmbedding: "gemini-embedding-001",
   lmstudio: ""
 };
 var RIBBON_ICON = "brain-circuit";
@@ -2559,7 +2559,7 @@ var OpenRouterProvider = _OpenRouterProvider;
 
 // src/ai/providers/geminiProvider.ts
 var _GeminiProvider = class _GeminiProvider extends BaseAIProvider {
-  constructor(apiKey, model, embedModel = "text-embedding-004") {
+  constructor(apiKey, model, embedModel = "gemini-embedding-001") {
     super();
     this.name = "Google Gemini";
     this.supportsNativeEmbeddings = true;
@@ -2611,6 +2611,11 @@ var _GeminiProvider = class _GeminiProvider extends BaseAIProvider {
     });
     if (!response.ok) {
       const err = await response.text();
+      if (response.status === 404) {
+        throw new Error(
+          `Gemini embedding model '${this.embedModel}' not found. Check the model name in settings or visit Google AI Studio for available models.`
+        );
+      }
       throw new Error(`Gemini embed error ${response.status}: ${err}`);
     }
     const data = await response.json();
@@ -3158,12 +3163,10 @@ var EmbeddingStore = class {
       `Loaded embedding store: ${this.data.size} live, ${this.tombstones.size} tombstoned, ${this.dimensions}D`
     );
   }
-  /** Persist all live entries to disk atomically (write temp → rename). */
   async save() {
-    const temp = this.tempPath();
+    const path = this.storePath();
     const buffer = this.encode();
-    await this.app.vault.adapter.writeBinary(temp, buffer);
-    await this.app.vault.adapter.rename(temp, this.storePath());
+    await this.app.vault.adapter.writeBinary(path, buffer);
     this.dirty = false;
     logger2.debug(`Saved embedding store (${this.data.size} entries, ${buffer.byteLength} bytes)`);
   }
