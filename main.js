@@ -28,7 +28,7 @@ __export(main_exports, {
   default: () => VaultTherapistPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian7 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/constants.ts
 var PLUGIN_NAME = "Vault Therapist";
@@ -43,6 +43,16 @@ var MAX_EMBEDDING_NOTES_PER_RUN = 500;
 var MAX_PROMPT_TOKENS = 6e3;
 var NETWORK_TIMEOUT_MS = 3e4;
 var LICENSE_OFFLINE_GRACE_MS = 24 * 60 * 60 * 1e3;
+var EMBEDDING_STORE_FILENAME = "embeddings.bin";
+var EMBEDDING_INDEX_FILENAME = "hnsw.index";
+var EMBEDDING_STORE_MAGIC = 1448345856;
+var EMBEDDING_STORE_VERSION = 1;
+var HNSW_M = 16;
+var HNSW_EF_CONSTRUCTION = 200;
+var HNSW_EF_SEARCH_DEFAULT = 50;
+var EMBEDDING_BATCH_SIZE = 20;
+var EMBEDDING_TOMBSTONE_RATIO = 0.2;
+var OLLAMA_LARGE_VAULT_THRESHOLD = 800;
 var SUPPORTED_PROVIDERS = ["ollama", "openai", "anthropic", "openrouter", "gemini", "lmstudio"];
 var DEFAULT_MODELS = {
   ollama: "gemma3:4b",
@@ -89,7 +99,8 @@ var DEFAULT_SETTINGS = {
   licenseValidatedAt: null,
   licenseOfflineGraceUntil: null,
   // Developer
-  debugMode: false
+  debugMode: false,
+  ollamaLargeVaultNoticeDismissed: false
 };
 
 // src/settings/settingsTab.ts
@@ -1311,9 +1322,10 @@ var FEATURES = [
   }
 ];
 var MainView = class extends import_obsidian2.ItemView {
-  constructor(leaf, settings, vaultReader, aiManager, embeddingManager, licenseManager) {
+  constructor(leaf, settings, vaultReader, aiManager, embeddingManager, licenseManager, embeddingStore) {
     super(leaf);
     this.logger = new Logger("MainView");
+    this.isEmbeddingGenerating = false;
     // Per-feature state (null = not yet run)
     this.counts = {
       orphan: null,
@@ -1329,6 +1341,7 @@ var MainView = class extends import_obsidian2.ItemView {
     this.aiManager = aiManager;
     this.embeddingManager = embeddingManager;
     this.licenseManager = licenseManager;
+    this.embeddingStore = embeddingStore;
   }
   getViewType() {
     return VIEW_TYPE_MAIN;
@@ -1361,43 +1374,48 @@ var MainView = class extends import_obsidian2.ItemView {
     contentEl.addClass("vt-view");
     contentEl.toggleClass("vt-view--running", isRunning);
     this.renderHeader(contentEl);
-    this.renderEmbeddingBanner(contentEl);
+    this.renderEmbeddingStatus(contentEl);
     this.renderCards(contentEl);
     this.renderReportButton(contentEl);
     this.renderFooter(contentEl);
   }
-  renderEmbeddingBanner(parent) {
+  renderEmbeddingStatus(parent) {
     const notes = this.vaultReader.getAllNotes();
     const total = notes.length;
     if (total === 0)
       return;
-    const withoutEmbeddings = notes.filter(
-      (n) => !n.embedding || n.embedding.length === 0
-    ).length;
+    const embeddedCount = this.embeddingStore.getStats().totalEntries;
+    const withoutEmbeddings = Math.max(0, total - embeddedCount);
     const fractionMissing = withoutEmbeddings / total;
-    if (fractionMissing <= EMBEDDING_COVERAGE_WARN_THRESHOLD)
-      return;
-    const banner = parent.createDiv({ cls: "vt-embed-banner" });
-    banner.createEl("div", {
-      cls: "vt-embed-banner-title",
-      text: "Generate embeddings for better results"
+    const wrap = parent.createDiv({ cls: "vt-embed-status" });
+    wrap.createEl("div", {
+      cls: "vt-embed-status-count",
+      text: `${embeddedCount} / ${total} notes embedded`
     });
-    banner.createEl("div", {
-      cls: "vt-embed-banner-desc",
-      text: `${withoutEmbeddings} of ${total} note(s) don't have embeddings yet. Similarity-based analyses (orphans, contradictions) will be limited until this completes.`
+    const btn = wrap.createEl("button", {
+      cls: "mod-cta vt-embed-status-btn",
+      text: this.isEmbeddingGenerating ? "Generating\u2026" : "Generate embeddings"
     });
-    const btn = banner.createEl("button", {
-      cls: "mod-cta vt-embed-banner-btn",
-      text: this.activeFeature === null ? "Generate embeddings now" : "Running\u2026"
-    });
-    if (this.activeFeature !== null)
+    if (this.isEmbeddingGenerating)
       btn.setAttribute("disabled", "");
     btn.addEventListener("click", () => this.generateEmbeddings());
+    if (fractionMissing > EMBEDDING_COVERAGE_WARN_THRESHOLD) {
+      const banner = wrap.createDiv({ cls: "vt-embed-banner" });
+      banner.createEl("div", {
+        cls: "vt-embed-banner-title",
+        text: "Embeddings needed for best results"
+      });
+      banner.createEl("div", {
+        cls: "vt-embed-banner-desc",
+        text: `${withoutEmbeddings} of ${total} note(s) don't have embeddings yet. Similarity-based analyses (orphans, contradictions) will be limited until this completes.`
+      });
+    }
   }
   async generateEmbeddings() {
-    if (this.activeFeature !== null)
+    if (this.activeFeature !== null || this.isEmbeddingGenerating)
       return;
     this.activeFeature = "all";
+    this.isEmbeddingGenerating = true;
     this.render();
     try {
       const notesMissing = this.vaultReader.getNotesWithoutEmbeddings();
@@ -1439,6 +1457,7 @@ var MainView = class extends import_obsidian2.ItemView {
       }
     } finally {
       this.activeFeature = null;
+      this.isEmbeddingGenerating = false;
       this.render();
     }
   }
@@ -1928,11 +1947,16 @@ var VaultTherapistSettingTab = class extends import_obsidian3.PluginSettingTab {
   // ── Embeddings ───────────────────────────────────────────────────────
   renderEmbeddingsSection(parent) {
     const body = this.section(parent, "Embeddings", false);
-    const notes = this.plugin.vaultReader.getAllNotes();
-    const withEmbeddings = notes.filter((n) => n.embedding && n.embedding.length > 0).length;
-    const total = notes.length;
+    const stats = this.plugin.embeddingStore.getStats();
+    const total = this.plugin.vaultReader.getAllNotes().length;
+    const embedded = stats.totalEntries;
+    const percent = total > 0 ? Math.round(embedded / total * 100) : 0;
     const coverageEl = body.createEl("div", { cls: "vt-embed-coverage" });
-    coverageEl.setText(`${withEmbeddings} / ${total} notes have embeddings`);
+    coverageEl.setText(`${embedded} / ${total} notes have embeddings (${percent}%)`);
+    if (stats.fileSizeBytes > 0) {
+      const sizeEl = body.createEl("div", { cls: "vt-embed-size" });
+      sizeEl.setText(`Store size: ${(stats.fileSizeBytes / 1024).toFixed(1)} KB`);
+    }
     const lastGenEl = body.createEl("div", { cls: "vt-embed-last-gen" });
     lastGenEl.setText(
       this.embeddingLastGeneratedAt ? `Last generated: ${new Date(this.embeddingLastGeneratedAt).toLocaleString()}` : "Not yet generated this session"
@@ -1951,7 +1975,7 @@ var VaultTherapistSettingTab = class extends import_obsidian3.PluginSettingTab {
         const batchNotes = this.plugin.vaultReader.getAllNotes();
         const batchTotal = batchNotes.length;
         const pollId = window.setInterval(() => {
-          const done = batchNotes.filter((n) => n.embedding && n.embedding.length > 0).length;
+          const done = this.plugin.embeddingStore.getStats().totalEntries;
           progressEl.textContent = `Embedding\u2026 ${done} / ${batchTotal} notes`;
         }, 400);
         try {
@@ -1959,7 +1983,7 @@ var VaultTherapistSettingTab = class extends import_obsidian3.PluginSettingTab {
             batchNotes,
             MAX_EMBEDDING_NOTES_PER_RUN
           );
-          const finalDone = batchNotes.filter((n) => n.embedding && n.embedding.length > 0).length;
+          const finalDone = this.plugin.embeddingStore.getStats().totalEntries;
           if (summary.status === "native") {
             this.embeddingLastGeneratedAt = Date.now();
             coverageEl.setText(`${finalDone} / ${batchTotal} notes have embeddings`);
@@ -2087,13 +2111,6 @@ var VaultTherapistSettingTab = class extends import_obsidian3.PluginSettingTab {
 };
 
 // src/ai/providers/baseProvider.ts
-function dotProduct(a, b) {
-  let sum = 0;
-  for (let i = 0; i < a.length; i++) {
-    sum += a[i] * b[i];
-  }
-  return sum;
-}
 function magnitude(vec) {
   let sum = 0;
   for (let i = 0; i < vec.length; i++) {
@@ -2106,16 +2123,6 @@ function normalize(vec) {
   if (mag === 0)
     return vec.slice();
   return vec.map((v) => v / mag);
-}
-function cosineSimilarity(a, b) {
-  if (a.length !== b.length) {
-    throw new Error(`Vector dimension mismatch: ${a.length} vs ${b.length}`);
-  }
-  const dot = dotProduct(a, b);
-  const magA = magnitude(a);
-  const magB = magnitude(b);
-  const denom = magA * magB;
-  return denom === 0 ? 0 : dot / denom;
 }
 var BaseAIProvider = class {
   constructor() {
@@ -2804,16 +2811,39 @@ var AIManager = class {
 };
 
 // src/ai/embeddingManager.ts
+var EmbeddingEventEmitter = class {
+  constructor() {
+    this.listeners = /* @__PURE__ */ new Map();
+  }
+  on(event, fn) {
+    if (!this.listeners.has(event)) {
+      this.listeners.set(event, /* @__PURE__ */ new Set());
+    }
+    this.listeners.get(event).add(fn);
+  }
+  off(event, fn) {
+    var _a;
+    (_a = this.listeners.get(event)) == null ? void 0 : _a.delete(fn);
+  }
+  emit(event, data) {
+    var _a;
+    (_a = this.listeners.get(event)) == null ? void 0 : _a.forEach((fn) => fn(data));
+  }
+};
 var EmbeddingManager = class {
-  constructor(aiManager) {
+  constructor(store, index, aiManager) {
+    this._emitter = new EmbeddingEventEmitter();
     this.logger = new Logger("EmbeddingManager");
     /** TF-IDF vectorizer, built lazily when native embeddings are unavailable. */
     this.tfidf = null;
-    /** Cache key: content hash → embedding, for incremental updates. */
-    this.embeddingCache = /* @__PURE__ */ new Map();
     /** Paths that failed to get an embedding in the most recent run. */
     this.lastFailedPaths = [];
+    this.store = store;
+    this.index = index;
     this.aiManager = aiManager;
+  }
+  get emitter() {
+    return this._emitter;
   }
   // ── Vault-wide embedding generation ──────────────────────────────
   /**
@@ -2830,7 +2860,7 @@ var EmbeddingManager = class {
     const totalRequested = notes.length;
     this.lastFailedPaths = [];
     if (totalRequested === 0) {
-      return {
+      const summary = {
         processed: 0,
         skipped: 0,
         totalRequested: 0,
@@ -2838,13 +2868,15 @@ var EmbeddingManager = class {
         message: "",
         failedPaths: []
       };
+      this._emitter.emit("complete", summary);
+      return summary;
     }
     if (this.aiManager.supportsNativeEmbeddings) {
       const reachable = await this.aiManager.testConnection();
       if (!reachable) {
-        throw new Error(
-          `${this.aiManager.providerName} is not reachable. Embeddings were not generated. Check that ${this.aiManager.providerName} is running and try again.`
-        );
+        const errorMsg = `${this.aiManager.providerName} is not reachable. Embeddings were not generated. Check that ${this.aiManager.providerName} is running and try again.`;
+        this._emitter.emit("error", { message: errorMsg });
+        throw new Error(errorMsg);
       }
     }
     let target = notes;
@@ -2860,8 +2892,8 @@ var EmbeddingManager = class {
       `Generating embeddings for ${target.length} notes via ${this.aiManager.providerName}`
     );
     if (!this.aiManager.supportsNativeEmbeddings) {
-      this.generateTfidfEmbeddings(target);
-      return {
+      await this.generateTfidfEmbeddings(target);
+      const summary = {
         processed: target.length,
         skipped,
         totalRequested,
@@ -2869,6 +2901,8 @@ var EmbeddingManager = class {
         message: this.buildTfidfMessage(target.length, this.aiManager.providerName),
         failedPaths: []
       };
+      this._emitter.emit("complete", summary);
+      return summary;
     }
     return this.generateNativeEmbeddings(target, skipped, totalRequested);
   }
@@ -2878,33 +2912,53 @@ var EmbeddingManager = class {
   }
   // ── Consumer-facing similarity search ────────────────────────────
   findSimilarNotes(target, allNotes, topK = 5) {
-    const targetVec = target.embedding;
-    if (!targetVec) {
-      this.logger.warn(`Note "${target.path}" has no embedding \u2014 skipping similarity search`);
-      return [];
+    const targetVec = this.store.get(target.path);
+    if (targetVec) {
+      const results = this.index.search(targetVec, topK + 1, HNSW_EF_SEARCH_DEFAULT);
+      const noteMap = new Map(allNotes.map((n) => [n.path, n.name]));
+      return results.filter((r) => r.id !== target.path).slice(0, topK).map((r) => {
+        var _a;
+        return {
+          path: r.id,
+          name: (_a = noteMap.get(r.id)) != null ? _a : r.id,
+          similarity: r.similarity
+        };
+      });
     }
-    const candidates = allNotes.filter((n) => n.path !== target.path && n.embedding);
-    const scored = candidates.map((n) => ({
-      path: n.path,
-      name: n.name,
-      similarity: cosineSimilarity(targetVec, n.embedding)
-    }));
-    return scored.sort((a, b) => b.similarity - a.similarity).slice(0, topK);
+    if (!this.aiManager.supportsNativeEmbeddings && this.tfidf) {
+      const tokens = this.tokenize(target);
+      const vec = this.computeTfidfVector(tokens, this.tfidf.vocabulary, this.tfidf.idf);
+      const queryVec = this.normalizeVector(vec);
+      const results = this.index.search(queryVec, topK + 1, HNSW_EF_SEARCH_DEFAULT);
+      const noteMap = new Map(allNotes.map((n) => [n.path, n.name]));
+      return results.filter((r) => r.id !== target.path).slice(0, topK).map((r) => {
+        var _a;
+        return {
+          path: r.id,
+          name: (_a = noteMap.get(r.id)) != null ? _a : r.id,
+          similarity: r.similarity
+        };
+      });
+    }
+    if (this.aiManager.supportsNativeEmbeddings) {
+      this.logger.warn(`Note "${target.path}" has no embedding \u2014 skipping similarity search`);
+    }
+    return [];
   }
-  /** Clear all cached embeddings and TF-IDF state. */
+  /** Clear TF-IDF state and failed-path tracking. Store and index are
+   *  persistent and managed externally — they are NOT cleared here. */
   clearCache() {
-    this.embeddingCache.clear();
     this.tfidf = null;
+    this.lastFailedPaths = [];
   }
   // ── Native embedding path with partial-failure recovery ───────────
   async generateNativeEmbeddings(notes, skipped, totalRequested) {
-    const BATCH_SIZE2 = 10;
     const BATCH_DELAY_MS2 = 100;
     const providerName = this.aiManager.providerName;
     let embeddedCount = 0;
     const failedPaths = [];
-    for (let i = 0; i < notes.length; i += BATCH_SIZE2) {
-      const batch = notes.slice(i, i + BATCH_SIZE2);
+    for (let i = 0; i < notes.length; i += EMBEDDING_BATCH_SIZE) {
+      const batch = notes.slice(i, i + EMBEDDING_BATCH_SIZE);
       const texts = batch.map((n) => this.buildEmbeddingText(n));
       try {
         const vectors = await this.aiManager.embedBatch(texts);
@@ -2918,8 +2972,9 @@ var EmbeddingManager = class {
           break;
         }
         for (let j = 0; j < batch.length; j++) {
-          batch[j].embedding = vectors[j];
-          this.embeddingCache.set(this.cacheKey(batch[j]), vectors[j]);
+          const vec = this.normalizeVector(vectors[j]);
+          await this.store.upsert(batch[j].path, vec);
+          this.index.insert(batch[j].path, vec);
         }
         embeddedCount += batch.length;
       } catch (err) {
@@ -2942,15 +2997,17 @@ var EmbeddingManager = class {
         }
         break;
       }
-      if (i + BATCH_SIZE2 < notes.length) {
+      this._emitter.emit("progress", { processed: embeddedCount, total: notes.length });
+      if (i + EMBEDDING_BATCH_SIZE < notes.length) {
         await this.delay(BATCH_DELAY_MS2);
       }
     }
     this.lastFailedPaths = failedPaths;
+    await this.store.save();
     const allSucceeded = failedPaths.length === 0;
     if (allSucceeded) {
       this.logger.info(`Native embeddings complete for ${embeddedCount} notes`);
-      return {
+      const summary2 = {
         processed: embeddedCount,
         skipped,
         totalRequested,
@@ -2958,6 +3015,8 @@ var EmbeddingManager = class {
         message: "",
         failedPaths: []
       };
+      this._emitter.emit("complete", summary2);
+      return summary2;
     }
     const message = this.buildPartialMessage(
       providerName,
@@ -2965,7 +3024,7 @@ var EmbeddingManager = class {
       totalRequested,
       failedPaths.length
     );
-    return {
+    const summary = {
       processed: embeddedCount,
       skipped,
       totalRequested,
@@ -2973,9 +3032,11 @@ var EmbeddingManager = class {
       message,
       failedPaths
     };
+    this._emitter.emit("complete", summary);
+    return summary;
   }
   // ── TF-IDF intentional fallback path ──────────────────────────────
-  generateTfidfEmbeddings(notes) {
+  async generateTfidfEmbeddings(notes) {
     this.logger.info("Using TF-IDF for embeddings (provider does not support native embeddings)");
     const tokenizedNotes = notes.map((n) => this.tokenize(n));
     const vocab = this.buildVocabulary(tokenizedNotes, 2e3);
@@ -2983,9 +3044,11 @@ var EmbeddingManager = class {
     this.tfidf = { vocabulary: vocab, idf };
     for (let i = 0; i < notes.length; i++) {
       const vec = this.computeTfidfVector(tokenizedNotes[i], vocab, idf);
-      notes[i].embedding = vec;
-      this.embeddingCache.set(this.cacheKey(notes[i]), vec);
+      const float32Vec = this.normalizeVector(vec);
+      await this.store.upsert(notes[i].path, float32Vec);
+      this.index.insert(notes[i].path, float32Vec);
     }
+    await this.store.save();
     this.logger.info(`TF-IDF embeddings complete for ${notes.length} notes (${vocab.length} terms)`);
   }
   // ── User-facing message builders ─────────────────────────────────
@@ -3048,16 +3111,647 @@ var EmbeddingManager = class {
     parts.push(note.content.slice(0, 2e3));
     return parts.join("\n");
   }
-  cacheKey(note) {
-    return `${note.path}:${note.modifiedAt}`;
+  /** Convert a number[] vector to Float32Array for storage and indexing. */
+  normalizeVector(vec) {
+    return new Float32Array(vec);
   }
   delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 };
 
-// src/vault/vaultReader.ts
+// src/ai/embeddingStore.ts
 var import_obsidian4 = require("obsidian");
+var STATUS_LIVE = 0;
+var STATUS_TOMBSTONE = 255;
+var logger2 = new Logger("EmbeddingStore");
+var EmbeddingStore = class {
+  constructor(app) {
+    /** Live entries: note path → embedding vector. */
+    this.data = /* @__PURE__ */ new Map();
+    /** Paths that have been deleted (tombstoned). */
+    this.tombstones = /* @__PURE__ */ new Set();
+    /** Whether in-memory state differs from what's on disk. */
+    this.dirty = false;
+    /** Number of dimensions per vector (set during load, 0 if empty). */
+    this.dimensions = 0;
+    this.app = app;
+  }
+  // ── Public API ────────────────────────────────────────────────────
+  /** Load the store from disk. If the file doesn't exist, starts empty. */
+  async load() {
+    const path = this.storePath();
+    let buffer;
+    try {
+      buffer = await this.app.vault.adapter.readBinary(path);
+    } catch (e) {
+      this.data.clear();
+      this.tombstones.clear();
+      this.dimensions = 0;
+      this.dirty = false;
+      logger2.info("No embedding store file found \u2014 starting empty");
+      return;
+    }
+    this.decode(buffer);
+    this.dirty = false;
+    logger2.info(
+      `Loaded embedding store: ${this.data.size} live, ${this.tombstones.size} tombstoned, ${this.dimensions}D`
+    );
+  }
+  /** Persist all live entries to disk atomically (write temp → rename). */
+  async save() {
+    const temp = this.tempPath();
+    const buffer = this.encode();
+    await this.app.vault.adapter.writeBinary(temp, buffer);
+    await this.app.vault.adapter.rename(temp, this.storePath());
+    this.dirty = false;
+    logger2.debug(`Saved embedding store (${this.data.size} entries, ${buffer.byteLength} bytes)`);
+  }
+  /** Add or update an embedding for the given note path. */
+  async upsert(path, vector) {
+    this.data.set(path, vector);
+    this.tombstones.delete(path);
+    if (this.dimensions === 0) {
+      this.dimensions = vector.length;
+    }
+    this.dirty = true;
+  }
+  /** Soft-delete (tombstone) an entry. The entry is removed from live data
+   *  and added to the tombstone set until compaction rewrites the file. */
+  async delete(path) {
+    if (this.data.has(path)) {
+      this.data.delete(path);
+      this.tombstones.add(path);
+      this.dirty = true;
+    }
+  }
+  /** Rewrite the store file without tombstones, clearing the tombstone set. */
+  async compact() {
+    this.tombstones.clear();
+    this.dirty = true;
+    await this.save();
+    logger2.info("Compacted embedding store \u2014 tombstones removed");
+  }
+  /** Retrieve the embedding for a note, or undefined if not stored. */
+  get(path) {
+    return this.data.get(path);
+  }
+  /** Check whether a live embedding exists for the given path. */
+  has(path) {
+    return this.data.has(path);
+  }
+  /** Return all live entries as a read-only view. */
+  getAll() {
+    return new Map(this.data);
+  }
+  /** Compute stats including file size (computed from in-memory state). */
+  getStats() {
+    const fileSizeBytes = this.computeEncodedSize();
+    return {
+      totalEntries: this.data.size + this.tombstones.size,
+      tombstoned: this.tombstones.size,
+      fileSizeBytes
+    };
+  }
+  /** Whether the tombstone ratio exceeds the compaction threshold. */
+  needsCompaction() {
+    const total = this.data.size + this.tombstones.size;
+    if (total === 0)
+      return false;
+    return this.tombstones.size / total > EMBEDDING_TOMBSTONE_RATIO;
+  }
+  // ── Path helpers ──────────────────────────────────────────────────
+  /** Normalized path to the embedding store binary file. */
+  storePath() {
+    return (0, import_obsidian4.normalizePath)(`.obsidian/plugins/vault-therapist/${EMBEDDING_STORE_FILENAME}`);
+  }
+  /** Normalized path to the temporary file used for atomic writes. */
+  tempPath() {
+    return (0, import_obsidian4.normalizePath)(`.obsidian/plugins/vault-therapist/${EMBEDDING_STORE_FILENAME}.tmp`);
+  }
+  // ── Binary encoding ───────────────────────────────────────────────
+  /** Encode all live entries into the binary format. */
+  encode() {
+    const encoder = new TextEncoder();
+    const entries = [];
+    for (const [path, vector] of this.data) {
+      entries.push({ path, vector });
+    }
+    const noteCount = entries.length;
+    const dims = this.dimensions || (entries.length > 0 ? entries[0].vector.length : 0);
+    let totalSize = 16;
+    for (const entry of entries) {
+      const pathBytes = encoder.encode(entry.path);
+      totalSize += 1 + 2 + pathBytes.length;
+      totalSize += dims * 4;
+    }
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new DataView(buffer);
+    let offset = 0;
+    view.setUint32(offset, EMBEDDING_STORE_MAGIC, true);
+    offset += 4;
+    view.setUint32(offset, EMBEDDING_STORE_VERSION, true);
+    offset += 4;
+    view.setUint32(offset, noteCount, true);
+    offset += 4;
+    view.setUint32(offset, dims, true);
+    offset += 4;
+    for (const entry of entries) {
+      const pathBytes = encoder.encode(entry.path);
+      view.setUint8(offset, STATUS_LIVE);
+      offset += 1;
+      view.setUint16(offset, pathBytes.length, true);
+      offset += 2;
+      new Uint8Array(buffer, offset, pathBytes.length).set(pathBytes);
+      offset += pathBytes.length;
+      for (let i = 0; i < dims; i++) {
+        view.setFloat32(offset, entry.vector[i], true);
+        offset += 4;
+      }
+    }
+    return buffer;
+  }
+  /** Compute the byte size that encode() would produce, without allocating. */
+  computeEncodedSize() {
+    const encoder = new TextEncoder();
+    const dims = this.dimensions || 0;
+    let totalSize = 16;
+    for (const path of this.data.keys()) {
+      const pathBytes = encoder.encode(path);
+      totalSize += 1 + 2 + pathBytes.length;
+      totalSize += dims * 4;
+    }
+    return totalSize;
+  }
+  /** Decode a binary buffer into this.data and this.tombstones. */
+  decode(buffer) {
+    const view = new DataView(buffer);
+    const decoder = new TextDecoder();
+    let offset = 0;
+    const magic = view.getUint32(offset, true);
+    offset += 4;
+    const version = view.getUint32(offset, true);
+    offset += 4;
+    const noteCount = view.getUint32(offset, true);
+    offset += 4;
+    const dims = view.getUint32(offset, true);
+    offset += 4;
+    if (magic !== EMBEDDING_STORE_MAGIC) {
+      throw new Error(
+        `Invalid embedding store magic: expected 0x${EMBEDDING_STORE_MAGIC.toString(16)}, got 0x${magic.toString(16)}`
+      );
+    }
+    if (version !== EMBEDDING_STORE_VERSION) {
+      throw new Error(
+        `Unsupported embedding store version: expected ${EMBEDDING_STORE_VERSION}, got ${version}`
+      );
+    }
+    this.dimensions = dims;
+    this.data.clear();
+    this.tombstones.clear();
+    for (let i = 0; i < noteCount; i++) {
+      const status = view.getUint8(offset);
+      offset += 1;
+      const pathLength = view.getUint16(offset, true);
+      offset += 2;
+      const pathBytes = new Uint8Array(buffer, offset, pathLength);
+      const path = decoder.decode(pathBytes);
+      offset += pathLength;
+      if (status === STATUS_TOMBSTONE) {
+        this.tombstones.add(path);
+        continue;
+      }
+      const vector = new Float32Array(dims);
+      for (let d = 0; d < dims; d++) {
+        vector[d] = view.getFloat32(offset, true);
+        offset += 4;
+      }
+      this.data.set(path, vector);
+    }
+  }
+};
+
+// src/ai/hnswIndex.ts
+var DEFAULT_CONFIG = {
+  M: HNSW_M,
+  efConstruction: HNSW_EF_CONSTRUCTION,
+  efSearch: HNSW_EF_SEARCH_DEFAULT
+};
+function sortDescending(a, b) {
+  return b.distance - a.distance;
+}
+function sortAscending(a, b) {
+  return a.distance - b.distance;
+}
+function norm(v) {
+  let sum = 0;
+  for (let i = 0; i < v.length; i++) {
+    sum += v[i] * v[i];
+  }
+  return Math.sqrt(sum);
+}
+function normalizeInPlace(v) {
+  const n = norm(v);
+  if (n === 0)
+    return v;
+  for (let i = 0; i < v.length; i++) {
+    v[i] /= n;
+  }
+  return v;
+}
+function dotProduct(a, b) {
+  let sum = 0;
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    sum += a[i] * b[i];
+  }
+  return sum;
+}
+var HNSWIndex = class _HNSWIndex {
+  constructor(config) {
+    this.nodes = /* @__PURE__ */ new Map();
+    this.entryPointId = null;
+    this.maxLevel = -1;
+    this.tombstones = /* @__PURE__ */ new Set();
+    this.dimensions = 0;
+    this.config = { ...DEFAULT_CONFIG, ...config };
+    this.mL = 1 / Math.log(this.config.M);
+  }
+  // -----------------------------------------------------------------------
+  // Public API
+  // -----------------------------------------------------------------------
+  /** Insert a node into the index. The vector is copied and normalized internally. */
+  insert(id, vector) {
+    var _a;
+    this.tombstones.delete(id);
+    const normalized = normalizeInPlace(Float32Array.from(vector));
+    if (this.nodes.has(id)) {
+      this.removeNode(id);
+    }
+    const level = this.randomLevel();
+    const node = {
+      id,
+      vector: normalized,
+      level,
+      connections: /* @__PURE__ */ new Map()
+    };
+    for (let l = 0; l <= level; l++) {
+      node.connections.set(l, []);
+    }
+    this.nodes.set(id, node);
+    if (this.entryPointId === null) {
+      this.entryPointId = id;
+      this.maxLevel = level;
+      this.dimensions = normalized.length;
+      return;
+    }
+    this.dimensions = normalized.length;
+    let currentId = this.entryPointId;
+    for (let l = this.maxLevel; l > level; l--) {
+      currentId = this.searchLayerOne(normalized, currentId, l);
+    }
+    for (let l = Math.min(level, this.maxLevel); l >= 0; l--) {
+      const neighbors = this.searchLayer(
+        normalized,
+        currentId,
+        this.config.efConstruction,
+        l
+      );
+      const selected = neighbors.sort(sortDescending).slice(0, this.config.M);
+      const neighborIds = selected.map((e) => e.id);
+      node.connections.set(l, neighborIds);
+      for (const neighborId of neighborIds) {
+        const neighbor = this.nodes.get(neighborId);
+        if (!neighbor)
+          continue;
+        const conns = (_a = neighbor.connections.get(l)) != null ? _a : [];
+        conns.push(id);
+        if (conns.length > this.config.M) {
+          this.shrinkConnections(neighbor, l);
+        } else {
+          neighbor.connections.set(l, conns);
+        }
+      }
+      if (selected.length > 0) {
+        currentId = selected[0].id;
+      }
+    }
+    if (level > this.maxLevel) {
+      this.entryPointId = id;
+      this.maxLevel = level;
+    }
+  }
+  search(query, k, ef) {
+    if (this.entryPointId === null || this.nodes.size === 0) {
+      return [];
+    }
+    const effectiveEf = ef != null ? ef : this.config.efSearch;
+    const normalized = normalizeInPlace(Float32Array.from(query));
+    let currentId = this.entryPointId;
+    for (let l = this.maxLevel; l >= 1; l--) {
+      currentId = this.searchLayerOne(normalized, currentId, l);
+    }
+    const candidates = this.searchLayer(normalized, currentId, effectiveEf, 0);
+    return candidates.filter((e) => !this.tombstones.has(e.id)).sort(sortDescending).slice(0, k).map((e) => ({ id: e.id, similarity: e.distance }));
+  }
+  /** Lazy deletion: mark a node as tombstoned. */
+  delete(id) {
+    const node = this.nodes.get(id);
+    if (!node)
+      return;
+    this.tombstones.add(id);
+  }
+  /** Check if a node exists and is not tombstoned. */
+  has(id) {
+    return this.nodes.has(id) && !this.tombstones.has(id);
+  }
+  /** Count of live (non-tombstoned) nodes. */
+  size() {
+    return this.nodes.size - this.tombstones.size;
+  }
+  /** Get the vector for a node, or undefined if not found / tombstoned. */
+  getVector(id) {
+    var _a;
+    if (!this.has(id))
+      return void 0;
+    return (_a = this.nodes.get(id)) == null ? void 0 : _a.vector;
+  }
+  /** Serialize the index to a binary Uint8Array. */
+  serialize() {
+    var _a, _b;
+    const MAGIC = 1213419095;
+    const VERSION = 1;
+    let size = 36;
+    const liveNodes = [];
+    for (const node of this.nodes.values()) {
+      if (this.tombstones.has(node.id))
+        continue;
+      liveNodes.push(node);
+      const idBytes = new TextEncoder().encode(node.id);
+      size += 2 + idBytes.length;
+      size += 4;
+      size += 4 + node.vector.byteLength;
+      size += 4;
+      for (let l = 0; l <= node.level; l++) {
+        const conns = (_a = node.connections.get(l)) != null ? _a : [];
+        size += 4 + 4;
+        for (const neighborId of conns) {
+          const nIdBytes = new TextEncoder().encode(neighborId);
+          size += 2 + nIdBytes.length;
+        }
+      }
+    }
+    const buffer = new ArrayBuffer(size);
+    const view = new DataView(buffer);
+    let offset = 0;
+    view.setUint32(offset, MAGIC, true);
+    offset += 4;
+    view.setUint32(offset, VERSION, true);
+    offset += 4;
+    view.setUint32(offset, this.config.M, true);
+    offset += 4;
+    view.setUint32(offset, this.config.efConstruction, true);
+    offset += 4;
+    view.setUint32(offset, this.config.efSearch, true);
+    offset += 4;
+    view.setUint32(offset, this.dimensions, true);
+    offset += 4;
+    view.setUint32(offset, liveNodes.length, true);
+    offset += 4;
+    view.setUint32(offset, this.maxLevel, true);
+    offset += 4;
+    view.setUint32(offset, 0, true);
+    offset += 4;
+    for (const node of liveNodes) {
+      const idBytes = new TextEncoder().encode(node.id);
+      view.setUint16(offset, idBytes.length, true);
+      offset += 2;
+      new Uint8Array(buffer, offset, idBytes.length).set(idBytes);
+      offset += idBytes.length;
+      view.setUint32(offset, node.level, true);
+      offset += 4;
+      view.setUint32(offset, node.vector.length, true);
+      offset += 4;
+      new Uint8Array(buffer, offset, node.vector.byteLength).set(
+        new Uint8Array(node.vector.buffer, node.vector.byteOffset, node.vector.byteLength)
+      );
+      offset += node.vector.byteLength;
+      const layerCount = node.level + 1;
+      view.setUint32(offset, layerCount, true);
+      offset += 4;
+      for (let l = 0; l <= node.level; l++) {
+        const conns = (_b = node.connections.get(l)) != null ? _b : [];
+        view.setUint32(offset, l, true);
+        offset += 4;
+        view.setUint32(offset, conns.length, true);
+        offset += 4;
+        for (const neighborId of conns) {
+          const nIdBytes = new TextEncoder().encode(neighborId);
+          view.setUint16(offset, nIdBytes.length, true);
+          offset += 2;
+          new Uint8Array(buffer, offset, nIdBytes.length).set(nIdBytes);
+          offset += nIdBytes.length;
+        }
+      }
+    }
+    return new Uint8Array(buffer);
+  }
+  /** Deserialize an index from binary data. */
+  static deserialize(data) {
+    const MAGIC = 1213419095;
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    let offset = 0;
+    const magic = view.getUint32(offset, true);
+    offset += 4;
+    if (magic !== MAGIC) {
+      throw new Error("Invalid HNSW index data: bad magic number");
+    }
+    const version = view.getUint32(offset, true);
+    offset += 4;
+    if (version !== 1) {
+      throw new Error(`Unsupported HNSW index version: ${version}`);
+    }
+    const M = view.getUint32(offset, true);
+    offset += 4;
+    const efConstruction = view.getUint32(offset, true);
+    offset += 4;
+    const efSearch = view.getUint32(offset, true);
+    offset += 4;
+    const dimensions = view.getUint32(offset, true);
+    offset += 4;
+    const nodeCount = view.getUint32(offset, true);
+    offset += 4;
+    const maxLevel = view.getUint32(offset, true);
+    offset += 4;
+    view.getUint32(offset, true);
+    offset += 4;
+    const index = new _HNSWIndex({ M, efConstruction, efSearch });
+    index.dimensions = dimensions;
+    index.maxLevel = maxLevel;
+    for (let i = 0; i < nodeCount; i++) {
+      const idLen = view.getUint16(offset, true);
+      offset += 2;
+      const idBytes = data.slice(offset, offset + idLen);
+      const id = new TextDecoder().decode(idBytes);
+      offset += idLen;
+      const level = view.getUint32(offset, true);
+      offset += 4;
+      const vecLen = view.getUint32(offset, true);
+      offset += 4;
+      const vector = new Float32Array(vecLen);
+      const vecBytes = data.slice(offset, offset + vecLen * 4);
+      new Uint8Array(vector.buffer).set(vecBytes);
+      offset += vecLen * 4;
+      const layerCount = view.getUint32(offset, true);
+      offset += 4;
+      const node = {
+        id,
+        vector,
+        level,
+        connections: /* @__PURE__ */ new Map()
+      };
+      for (let l = 0; l < layerCount; l++) {
+        const layer = view.getUint32(offset, true);
+        offset += 4;
+        const neighborCount = view.getUint32(offset, true);
+        offset += 4;
+        const neighbors = [];
+        for (let n = 0; n < neighborCount; n++) {
+          const nIdLen = view.getUint16(offset, true);
+          offset += 2;
+          const nIdBytes = data.slice(offset, offset + nIdLen);
+          neighbors.push(new TextDecoder().decode(nIdBytes));
+          offset += nIdLen;
+        }
+        node.connections.set(layer, neighbors);
+      }
+      index.nodes.set(id, node);
+      if (index.entryPointId === null) {
+        index.entryPointId = id;
+      }
+    }
+    return index;
+  }
+  // -----------------------------------------------------------------------
+  // Private helpers
+  // -----------------------------------------------------------------------
+  /** Assign a random level using the HNSW formula. */
+  randomLevel() {
+    return Math.floor(-Math.log(Math.random()) * this.mL);
+  }
+  /**
+   * Greedy single-node search within a layer.
+   * Used for descending from top layers during insertion and search.
+   */
+  searchLayerOne(query, entryId, layer) {
+    var _a;
+    let currentId = entryId;
+    let currentSim = dotProduct(query, this.nodes.get(currentId).vector);
+    let improved = true;
+    while (improved) {
+      improved = false;
+      const node = this.nodes.get(currentId);
+      const conns = (_a = node.connections.get(layer)) != null ? _a : [];
+      for (const neighborId of conns) {
+        const neighbor = this.nodes.get(neighborId);
+        if (!neighbor)
+          continue;
+        const sim = dotProduct(query, neighbor.vector);
+        if (sim > currentSim) {
+          currentId = neighborId;
+          currentSim = sim;
+          improved = true;
+        }
+      }
+    }
+    return currentId;
+  }
+  /** Beam search within a layer, returning up to `ef` closest nodes. */
+  searchLayer(query, entryId, ef, layer) {
+    var _a;
+    const visited = /* @__PURE__ */ new Set();
+    const candidates = [];
+    const results = [];
+    const entryNode = this.nodes.get(entryId);
+    if (!entryNode)
+      return results;
+    const entrySim = dotProduct(query, entryNode.vector);
+    visited.add(entryId);
+    candidates.push({ id: entryId, distance: entrySim });
+    results.push({ id: entryId, distance: entrySim });
+    while (candidates.length > 0) {
+      candidates.sort(sortDescending);
+      const closest = candidates.shift();
+      results.sort(sortAscending);
+      const furthest = results[0];
+      if (closest.distance < furthest.distance)
+        break;
+      const node = this.nodes.get(closest.id);
+      if (!node)
+        continue;
+      const conns = (_a = node.connections.get(layer)) != null ? _a : [];
+      for (const neighborId of conns) {
+        if (visited.has(neighborId))
+          continue;
+        visited.add(neighborId);
+        const neighbor = this.nodes.get(neighborId);
+        if (!neighbor)
+          continue;
+        const sim = dotProduct(query, neighbor.vector);
+        results.sort(sortAscending);
+        const worstResultDist = results.length < ef ? -Infinity : results[0].distance;
+        if (sim > worstResultDist || results.length < ef) {
+          candidates.push({ id: neighborId, distance: sim });
+          results.push({ id: neighborId, distance: sim });
+          if (results.length > ef) {
+            results.sort(sortAscending);
+            results.shift();
+          }
+        }
+      }
+    }
+    return results;
+  }
+  shrinkConnections(node, layer) {
+    var _a;
+    const conns = (_a = node.connections.get(layer)) != null ? _a : [];
+    if (conns.length <= this.config.M)
+      return;
+    const scored = conns.map((neighborId) => {
+      const neighbor = this.nodes.get(neighborId);
+      const sim = neighbor ? dotProduct(node.vector, neighbor.vector) : -Infinity;
+      return { id: neighborId, distance: sim };
+    });
+    scored.sort(sortDescending);
+    node.connections.set(layer, scored.slice(0, this.config.M).map((e) => e.id));
+  }
+  removeNode(id) {
+    var _a;
+    const node = this.nodes.get(id);
+    if (!node)
+      return;
+    for (let l = 0; l <= node.level; l++) {
+      const conns = (_a = node.connections.get(l)) != null ? _a : [];
+      for (const neighborId of conns) {
+        const neighbor = this.nodes.get(neighborId);
+        if (!neighbor)
+          continue;
+        const neighborConns = neighbor.connections.get(l);
+        if (neighborConns) {
+          const idx = neighborConns.indexOf(id);
+          if (idx !== -1) {
+            neighborConns.splice(idx, 1);
+          }
+        }
+      }
+    }
+    this.nodes.delete(id);
+    this.tombstones.delete(id);
+  }
+};
+
+// src/vault/vaultReader.ts
+var import_obsidian5 = require("obsidian");
 
 // src/vault/noteParser.ts
 var NoteParser = class {
@@ -3228,7 +3922,7 @@ var BUILTIN_EXCLUDED_FOLDERS = /* @__PURE__ */ new Set([
   "_attachments"
 ]);
 var VaultReader = class {
-  constructor(app, settings) {
+  constructor(app, settings, embeddingStore) {
     this.parser = new NoteParser();
     this.logger = new Logger("VaultReader");
     this.noteCache = /* @__PURE__ */ new Map();
@@ -3236,6 +3930,7 @@ var VaultReader = class {
     this.eventRefs = [];
     this.app = app;
     this.settings = settings;
+    this.embeddingStore = embeddingStore;
   }
   /**
    * Read all eligible vault markdown files into the in-memory cache.
@@ -3348,7 +4043,10 @@ var VaultReader = class {
     return result;
   }
   getNotesWithoutEmbeddings() {
-    return this.getAllNotes().filter((n) => !n.embedding || n.embedding.length === 0);
+    return this.getAllNotes().filter((n) => !this.embeddingStore.has(n.path));
+  }
+  getAllNotePaths() {
+    return this.getAllNotes().map((n) => n.path);
   }
   getTotalWordCount() {
     return this.getAllNotes().reduce((sum, n) => sum + n.wordCount, 0);
@@ -3394,14 +4092,14 @@ var VaultReader = class {
    */
   registerChangeListeners() {
     const onCreateOrModify = (file) => {
-      if (!(file instanceof import_obsidian4.TFile) || file.extension !== "md")
+      if (!(file instanceof import_obsidian5.TFile) || file.extension !== "md")
         return;
       this.refreshNote(file).catch(
         (err) => this.logger.error(`refreshNote error for "${file.path}": ${String(err)}`)
       );
     };
     const onDelete = (file) => {
-      if (!(file instanceof import_obsidian4.TFile))
+      if (!(file instanceof import_obsidian5.TFile))
         return;
       this.noteCache.delete(file.path);
       this.logger.debug(`Removed "${file.path}" from cache`);
@@ -3548,14 +4246,14 @@ var TrialManager = class {
 
 // src/utils/crypto.ts
 var import_crypto = require("crypto");
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 function sha256(input) {
   return (0, import_crypto.createHash)("sha256").update(input, "utf8").digest("hex");
 }
 function vaultFingerprint(app) {
   const platform = typeof process !== "undefined" ? process.platform : "web";
   const vaultName = app.vault.getName();
-  const raw = `${platform}::${import_obsidian5.apiVersion}::${vaultName}`;
+  const raw = `${platform}::${import_obsidian6.apiVersion}::${vaultName}`;
   return sha256(raw).slice(0, 24);
 }
 function isValidKeyFormat(key) {
@@ -3739,8 +4437,8 @@ var LicenseManager = class {
 };
 
 // src/ui/licenseModal.ts
-var import_obsidian6 = require("obsidian");
-var LicenseModal = class extends import_obsidian6.Modal {
+var import_obsidian7 = require("obsidian");
+var LicenseModal = class extends import_obsidian7.Modal {
   constructor(app, licenseManager, onActivated) {
     super(app);
     this.licenseManager = licenseManager;
@@ -3780,7 +4478,7 @@ var LicenseModal = class extends import_obsidian6.Modal {
     });
     if (!status.isValid) {
       let keyValue = "";
-      new import_obsidian6.Setting(contentEl).setName("License Key").setDesc("License keys are emailed after purchase").addText((text) => {
+      new import_obsidian7.Setting(contentEl).setName("License Key").setDesc("License keys are emailed after purchase").addText((text) => {
         text.inputEl.type = "password";
         text.inputEl.style.width = "100%";
         text.setPlaceholder("Paste your license key").onChange((v) => {
@@ -3794,18 +4492,18 @@ var LicenseModal = class extends import_obsidian6.Modal {
       });
       activateBtn.addEventListener("click", async () => {
         if (!keyValue) {
-          new import_obsidian6.Notice("Please enter a license key.");
+          new import_obsidian7.Notice("Please enter a license key.");
           return;
         }
         activateBtn.textContent = "Validating\u2026";
         activateBtn.disabled = true;
         const outcome = await this.licenseManager.validateKeyDetailed(keyValue);
         if (outcome === "valid") {
-          new import_obsidian6.Notice("\u2713 License activated! Thank you for supporting Vault Therapist.");
+          new import_obsidian7.Notice("\u2713 License activated! Thank you for supporting Vault Therapist.");
           this.onActivated();
           this.close();
         } else if (outcome === "network-unreachable") {
-          new import_obsidian6.Notice(
+          new import_obsidian7.Notice(
             "License server unreachable. You have 24 hours of offline access \u2014 we'll re-validate automatically when your connection returns.",
             8e3
           );
@@ -3813,11 +4511,11 @@ var LicenseModal = class extends import_obsidian6.Modal {
           this.onActivated();
           this.close();
         } else if (outcome === "bad-format") {
-          new import_obsidian6.Notice("\u2717 That doesn't look like a valid license key format.");
+          new import_obsidian7.Notice("\u2717 That doesn't look like a valid license key format.");
           activateBtn.textContent = "Activate License";
           activateBtn.disabled = false;
         } else {
-          new import_obsidian6.Notice("\u2717 License key rejected by the server. Please check and try again.");
+          new import_obsidian7.Notice("\u2717 License key rejected by the server. Please check and try again.");
           activateBtn.textContent = "Activate License";
           activateBtn.disabled = false;
         }
@@ -3849,7 +4547,7 @@ var LicenseModal = class extends import_obsidian6.Modal {
 };
 
 // src/main.ts
-var VaultTherapistPlugin = class extends import_obsidian7.Plugin {
+var VaultTherapistPlugin = class extends import_obsidian8.Plugin {
   constructor() {
     super(...arguments);
     this.logger = new Logger("Plugin");
@@ -3857,9 +4555,19 @@ var VaultTherapistPlugin = class extends import_obsidian7.Plugin {
   async onload() {
     await this.loadSettings();
     setGlobalLogLevel(this.settings.debugMode ? "debug" : "info");
-    this.vaultReader = new VaultReader(this.app, this.settings);
+    this.embeddingStore = new EmbeddingStore(this.app);
+    await this.embeddingStore.load();
+    this.hnswIndex = new HNSWIndex({
+      M: HNSW_M,
+      efConstruction: HNSW_EF_CONSTRUCTION,
+      efSearch: HNSW_EF_SEARCH_DEFAULT
+    });
+    for (const [path, vector] of this.embeddingStore.getAll()) {
+      this.hnswIndex.insert(path, vector);
+    }
+    this.vaultReader = new VaultReader(this.app, this.settings, this.embeddingStore);
     this.aiManager = new AIManager(this.settings);
-    this.embeddingManager = new EmbeddingManager(this.aiManager);
+    this.embeddingManager = new EmbeddingManager(this.embeddingStore, this.hnswIndex, this.aiManager);
     this.licenseManager = new LicenseManager(this.app, this.settings, () => this.saveSettings());
     await this.licenseManager.initialize();
     await this.vaultReader.initialize();
@@ -3872,7 +4580,8 @@ var VaultTherapistPlugin = class extends import_obsidian7.Plugin {
         this.vaultReader,
         this.aiManager,
         this.embeddingManager,
-        this.licenseManager
+        this.licenseManager,
+        this.embeddingStore
       )
     );
     this.registerView(
@@ -3923,14 +4632,66 @@ var VaultTherapistPlugin = class extends import_obsidian7.Plugin {
       } else {
         this.activateMainView();
       }
+      this.reconcileEmbeddings();
+      if (this.settings.aiProvider === "ollama" && this.vaultReader.getAllNotes().length > OLLAMA_LARGE_VAULT_THRESHOLD && !this.settings.ollamaLargeVaultNoticeDismissed) {
+        const notice = new import_obsidian8.Notice(
+          `Vault Therapist: Your vault has over ${OLLAMA_LARGE_VAULT_THRESHOLD} notes. Consider switching to OpenAI text-embedding-3-small for better reliability.`,
+          0
+        );
+        const dismissBtn = notice.noticeEl.createEl("button", {
+          text: "Dismiss",
+          cls: "vt-notice-dismiss"
+        });
+        dismissBtn.addEventListener("click", () => {
+          this.settings.ollamaLargeVaultNoticeDismissed = true;
+          this.saveSettings();
+          notice.hide();
+        });
+      }
     });
     this.logger.info(`${PLUGIN_NAME} loaded.`);
   }
   onunload() {
+    this.embeddingStore.save().catch(() => {
+    });
+    const data = this.hnswIndex.serialize();
+    this.app.vault.adapter.writeBinary(
+      (0, import_obsidian8.normalizePath)(`.obsidian/plugins/vault-therapist/${EMBEDDING_INDEX_FILENAME}`),
+      data.buffer
+    ).catch(() => {
+    });
     this.vaultReader.unregisterListeners();
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_MAIN);
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_REPORT);
     this.logger.info(`${PLUGIN_NAME} unloaded.`);
+  }
+  async reconcileEmbeddings() {
+    const vaultPaths = new Set(this.vaultReader.getAllNotePaths());
+    const storedPaths = Array.from(this.embeddingStore.getAll().keys());
+    let deleted = 0;
+    for (const storedPath of storedPaths) {
+      if (!vaultPaths.has(storedPath)) {
+        await this.embeddingStore.delete(storedPath);
+        this.hnswIndex.delete(storedPath);
+        deleted++;
+      }
+    }
+    if (deleted > 0) {
+      this.logger.info(`Reconciled embeddings: removed ${deleted} stale entries`);
+      if (this.embeddingStore.needsCompaction()) {
+        await this.embeddingStore.compact();
+      } else {
+        await this.embeddingStore.save();
+      }
+      this.hnswIndex = new HNSWIndex({
+        M: HNSW_M,
+        efConstruction: HNSW_EF_CONSTRUCTION,
+        efSearch: HNSW_EF_SEARCH_DEFAULT
+      });
+      for (const [path, vector] of this.embeddingStore.getAll()) {
+        this.hnswIndex.insert(path, vector);
+      }
+    }
   }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -3951,7 +4712,7 @@ var VaultTherapistPlugin = class extends import_obsidian7.Plugin {
     }
     const leaf = workspace.getRightLeaf(false);
     if (!leaf) {
-      new import_obsidian7.Notice(`${PLUGIN_NAME}: Could not open sidebar.`);
+      new import_obsidian8.Notice(`${PLUGIN_NAME}: Could not open sidebar.`);
       return;
     }
     await leaf.setViewState({ type: VIEW_TYPE_MAIN, active: true });
